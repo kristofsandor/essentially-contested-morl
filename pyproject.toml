@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["env"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[project]
+name = "md-morl"
+version = "0.0.1"
+dependencies = [
+  "gymnasium",
+  "numpy",
+  "pygame>=2.1.3",
+  "morl-baselines @ git+https://github.com/LucasAlegre/morl-baselines.git",
+  "mo-gymnasium",
+  "torch",
+  "matplotlib",
+  "wandb",
+  "pre-commit",
+]
