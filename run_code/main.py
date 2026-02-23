@@ -1,12 +1,27 @@
 """
-Example usage of the FireRescueEnv environment.
-
 This demonstrates how to use the fire rescue environment and interpret the multi-objective
 rewards according to different ethical theories.
 """
 
 import numpy as np
+import pygame
+
+# import wandb
 from env import FireRescueEnv
+
+# wandb.init(project="ecc-morl")
+
+
+def wait_for_space():
+    """Wait for space bar press, return True when pressed. Returns False if window is closed."""
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return False  # Window closed
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_SPACE:
+                    return True
+        pygame.time.wait(10)  # Small delay to avoid busy-waiting
 
 
 def main():
@@ -34,9 +49,18 @@ def main():
 
     total_rewards = np.zeros(7)
     step = 0
+    max_steps = 50
+    running = True
 
-    # Run a few steps
-    for _ in range(50):
+    print("Press SPACE to advance each step. Close window to exit.\n")
+
+    # Run steps manually - wait for space bar before each step
+    while running and step < max_steps:
+        # Wait for space bar before stepping
+        if not wait_for_space():
+            running = False
+            break
+
         # Random action
         action = env.action_space.sample()
         obs, reward_vector, terminated, truncated, info = env.step(action)
