@@ -146,10 +146,7 @@ class FireRescueEnv(gym.Env):
         # [task_reward, safety_sentient, safety_classical, safety_hedonistic,
         #  fairness_equal, fairness_proportional, fairness_minimum]
         self.reward_space = spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=(7,),
-            dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32
         )
         self.reward_dim = 7
 
@@ -170,6 +167,7 @@ class FireRescueEnv(gym.Env):
             try:
                 # Try to get spec from registry
                 from gymnasium.envs.registration import registry
+
                 if "FireRescue-v0" in registry:
                     self.spec = registry["FireRescue-v0"]
                 else:
@@ -184,6 +182,7 @@ class FireRescueEnv(gym.Env):
                 class SimpleSpec:
                     def __init__(self, env_id):
                         self.id = env_id
+
                 self.spec = SimpleSpec("FireRescue-v0")
 
         self.window = None
@@ -200,9 +199,7 @@ class FireRescueEnv(gym.Env):
         self.entity_rescued = np.zeros(self.num_entities, dtype=bool)
         self.entity_fire_damage = np.zeros(self.num_entities, dtype=int)
         self.entity_help_received = np.zeros(self.num_entities, dtype=int)
-        self.entity_positions = np.full(
-            (self.num_entities, 2), 0, dtype=int
-        ) 
+        self.entity_positions = np.full((self.num_entities, 2), 0, dtype=int)
         self.entity_alive = np.ones(self.num_entities, dtype=bool)
 
         # Fire tracking - boolean grid for O(1) lookup and vectorization
@@ -318,7 +315,7 @@ class FireRescueEnv(gym.Env):
 
         # Fairness a) Equal help: no one got more help than others
         help_variance = np.var(self.entity_help_received)
-        fairness_equal = -help_variance  # Lower variance = more equal = better
+        fairness_equal = 1 - help_variance  # Lower variance = more equal = better
 
         # Fairness b) Proportional to need: help proportionate to vulnerability
         # Compare distributions of expected vs received help
@@ -639,7 +636,7 @@ class FireRescueEnv(gym.Env):
                 ]
                 pygame.draw.polygon(canvas, (255, 255, 255), highlight_points)
 
-        # Draw entities 
+        # Draw entities
         for i in range(self.num_entities):
             center = (np.array(self.entity_positions[i]) + 0.5) * pix_square_size
 
@@ -705,7 +702,11 @@ class FireRescueEnv(gym.Env):
                 )
 
             # Draw damage indicator (only for alive entities)
-            if self.entity_fire_damage[i] > 0 and self.entity_alive[i] and not self.entity_rescued[i]:
+            if (
+                self.entity_fire_damage[i] > 0
+                and self.entity_alive[i]
+                and not self.entity_rescued[i]
+            ):
                 damage_radius = (
                     pix_square_size * 0.15 * (self.entity_fire_damage[i] / 5.0)
                 )

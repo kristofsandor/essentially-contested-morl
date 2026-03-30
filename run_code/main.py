@@ -28,12 +28,12 @@ def main():
     # Create the environment
     env = FireRescueEnv(
         render_mode="human",
-        size=10,
-        num_humans=20,
-        num_dogs=15,
+        size=5,
+        num_humans=2,
+        num_dogs=1,
         max_steps=1000,
         fire_spread_prob=0.3,
-        initial_fire_cells=3,
+        initial_fire_cells=1,
     )
 
     # Reset the environment
@@ -77,7 +77,9 @@ def main():
             print(f"  Fairness (Equal help): {total_rewards[4]:.2f}")
             print(f"  Fairness (Proportional to need): {total_rewards[5]:.2f}")
             print(f"  Fairness (Minimum threshold): {total_rewards[6]:.2f}")
-            print(f"  Rescued: {info['rescued_count']} | Injured: {info['injured_count']} | Dead: {info['dead_count']}")
+            print(
+                f"  Rescued: {info['rescued_count']} | Injured: {info['injured_count']} | Dead: {info['dead_count']}"
+            )
             print(f"  Fire cells: {info['fire_cells']}")
 
         if terminated or truncated:

@@ -86,12 +86,7 @@ class PQL(MOAgent):
         self.num_objectives = self.env.unwrapped.reward_space.shape[0]
         self.counts = np.zeros((self.num_states, self.num_actions))
         self.non_dominated = [
-            [
-                {
-                    tuple(np.zeros(self.num_objectives))
-                    }
-                     for _ in range(self.num_actions)
-            ]
+            [{tuple(np.zeros(self.num_objectives))} for _ in range(self.num_actions)]
             for _ in range(self.num_states)
         ]
         self.avg_reward = np.zeros(
@@ -175,7 +170,7 @@ class PQL(MOAgent):
         nd_array = np.array(list(self.non_dominated[state][action]))
         # avg_reward -> state x action x objectives
         # avg_reward[state, action] -> 1 x objectives
-        # q_array -> 1 x objectives 
+        # q_array -> 1 x objectives
         q_array = self.avg_reward[state, action] + self.gamma * nd_array
         return {tuple(vec) for vec in q_array}
 
@@ -367,3 +362,4 @@ class PQL(MOAgent):
         q_sets = [self.get_q_set(state, action) for action in range(self.num_actions)]
         candidates = set().union(*q_sets)
         return get_non_dominated(candidates)
+        

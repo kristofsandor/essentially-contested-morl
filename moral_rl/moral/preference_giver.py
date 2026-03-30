@@ -8,8 +8,8 @@ class TargetGiverv3:
         self.target = np.array(target)
 
     def query_pair(self, ret_a, ret_b):
-        dist_a = ((ret_a-self.target)**2).sum()
-        dist_b = ((ret_b-self.target)**2).sum()
+        dist_a = ((ret_a - self.target) ** 2).sum()
+        dist_b = ((ret_b - self.target) ** 2).sum()
 
         if dist_a < dist_b:
             return [1, 0]
@@ -29,7 +29,7 @@ class PreferenceGiverv3:
         ratio_sum = sum(ratio)
 
         for elem in ratio:
-            self.ratio_normalized.append(elem/ratio_sum)
+            self.ratio_normalized.append(elem / ratio_sum)
 
     def query_pair(self, ret_a, ret_b):
 
@@ -52,8 +52,8 @@ class PreferenceGiverv3:
         ret_b_sum = sum(ret_b_copy)
 
         for i in range(self.d):
-            ret_a_normalized.append(ret_a_copy[i]/ret_a_sum)
-            ret_b_normalized.append(ret_b_copy[i]/ret_b_sum)
+            ret_a_normalized.append(ret_a_copy[i] / ret_a_sum)
+            ret_b_normalized.append(ret_b_copy[i] / ret_b_sum)
 
         kl_a = st.entropy(ret_a_normalized, self.ratio_normalized)
         kl_b = st.entropy(ret_b_normalized, self.ratio_normalized)

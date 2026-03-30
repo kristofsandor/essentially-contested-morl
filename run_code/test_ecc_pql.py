@@ -16,7 +16,7 @@ def test():
         fire_spread_prob=0.2,
         initial_fire_cells=1,
     )
-    
+
     print("Creating agent...")
     safety_ref_point = np.array([0.0, 0.0, 0.0])
     fairness_ref_point = np.array([0.0, 0.0, 0.0])

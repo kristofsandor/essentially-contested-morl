@@ -17,8 +17,8 @@ class PreferenceLearner:
         self.prefs.append(pref)
 
     def w_prior(self, w):
-        if np.linalg.norm(w) <=1 and np.all(np.array(w) >= 0):
-            return (2**self.d)/(math.pi**(self.d/2)/math.gamma(self.d/2 + 1))
+        if np.linalg.norm(w) <= 1 and np.all(np.array(w) >= 0):
+            return (2**self.d) / (math.pi ** (self.d / 2) / math.gamma(self.d / 2 + 1))
         else:
             return 0
 
@@ -26,16 +26,16 @@ class PreferenceLearner:
         sample = np.random.rand(n, self.d)
         w_out = []
         for w in sample:
-            w_out.append(list(w/np.linalg.norm(w)))
+            w_out.append(list(w / np.linalg.norm(w)))
         return np.array(w_out)
 
     @staticmethod
     def f_loglik(w, delta, pref):
-        return np.log(np.minimum(1, np.exp(pref*np.dot(w, delta)) + 1e-5))
+        return np.log(np.minimum(1, np.exp(pref * np.dot(w, delta)) + 1e-5))
 
     @staticmethod
     def vanilla_loglik(w, delta, pref):
-        return np.log(1/(1+np.exp(-pref*np.dot(w, delta))))
+        return np.log(1 / (1 + np.exp(-pref * np.dot(w, delta))))
 
     @staticmethod
     def propose_w_prob(w1, w2):
@@ -56,8 +56,8 @@ class PreferenceLearner:
 
         return loglik + log_prior
 
-    def mcmc_vanilla(self, w_init='mode'):
-        if w_init == 'mode':
+    def mcmc_vanilla(self, w_init="mode"):
+        if w_init == "mode":
             w_init = [0 for i in range(self.d)]
 
         w_arr = []
@@ -74,7 +74,9 @@ class PreferenceLearner:
             if prob_new > prob_curr:
                 acceptance_ratio = 1
             else:
-                qr = self.propose_w_prob(w_curr, w_new) / self.propose_w_prob(w_new, w_curr)
+                qr = self.propose_w_prob(w_curr, w_new) / self.propose_w_prob(
+                    w_new, w_curr
+                )
                 acceptance_ratio = np.exp(prob_new - prob_curr) * qr
             acceptance_prob = min(1, acceptance_ratio)
 
@@ -87,9 +89,9 @@ class PreferenceLearner:
 
             accept_rates.append(accept_cum / i)
 
-        self.accept_rates = np.array(accept_rates)[self.warmup:]
+        self.accept_rates = np.array(accept_rates)[self.warmup :]
 
-        return np.array(w_arr)[self.warmup:]
+        return np.array(w_arr)[self.warmup :]
 
 
 class VolumeBuffer:
@@ -113,18 +115,22 @@ class VolumeBuffer:
         expected_volume_a = 0
         expected_volume_b = 0
         for w in w_posterior:
-            expected_volume_a += (1 - PreferenceLearner.f_loglik(w, delta, 1))
-            expected_volume_b += (1 - PreferenceLearner.f_loglik(w, delta, -1))
+            expected_volume_a += 1 - PreferenceLearner.f_loglik(w, delta, 1)
+            expected_volume_b += 1 - PreferenceLearner.f_loglik(w, delta, -1)
 
-        return min(expected_volume_a / len(w_posterior), expected_volume_b / len(w_posterior))
+        return min(
+            expected_volume_a / len(w_posterior), expected_volume_b / len(w_posterior)
+        )
 
     def sample_return_pair(self):
         observed_logs_returns = np.array(self.observed_logs).sum(axis=0)
-        rand_idx = np.random.choice(np.arange(len(observed_logs_returns)), 2, replace=False)
+        rand_idx = np.random.choice(
+            np.arange(len(observed_logs_returns)), 2, replace=False
+        )
 
         # v2-Environment comparison
-        #new_returns_a = observed_logs_returns[rand_idx[0]]
-        #new_returns_b = observed_logs_returns[rand_idx[1]]
+        # new_returns_a = observed_logs_returns[rand_idx[0]]
+        # new_returns_b = observed_logs_returns[rand_idx[1]]
 
         # v3-Environment comparison (vase agnostic)
         new_returns_a = observed_logs_returns[rand_idx[0], 0:3]
@@ -138,8 +144,8 @@ class VolumeBuffer:
             objective_logs_returns = np.array(self.objective_logs).sum(axis=0)
 
             # v2-Environment comparison
-            #logs_a = objective_logs_returns[rand_idx[0]]
-            #logs_b = objective_logs_returns[rand_idx[1]]
+            # logs_a = objective_logs_returns[rand_idx[0]]
+            # logs_b = objective_logs_returns[rand_idx[1]]
 
             # v3-Environment comparison (vase agnostic)
             logs_a = objective_logs_returns[rand_idx[0], 0:3]
@@ -150,7 +156,15 @@ class VolumeBuffer:
         else:
             return np.array(new_returns_a), np.array(new_returns_b)
 
-    def compare_delta(self, w_posterior, new_returns_a, new_returns_b, logs_a=None, logs_b=None, random=False):
+    def compare_delta(
+        self,
+        w_posterior,
+        new_returns_a,
+        new_returns_b,
+        logs_a=None,
+        logs_b=None,
+        random=False,
+    ):
         delta = new_returns_a - new_returns_b
         volume_delta = self.volume_removal(w_posterior, delta)
         if volume_delta > self.best_volume or random:
@@ -164,4 +178,3 @@ class VolumeBuffer:
         self.best_delta = None
         self.best_returns = None
         self.best_observed_returns = (None, None)
-

@@ -1,6 +1,7 @@
 from .fire_rescue import Actions, FireRescueEnv
 import numpy as np
 
+
 class TaskIdx(Enum):
     DIAMOND = 0
     RESCUE = 1
@@ -13,7 +14,7 @@ class FireRescueBaseline(FireRescueEnv):
         self.step_count += 1
 
         diamond_collected = False
-        
+
         if action == Actions.RESCUE.value:
             self._handle_rescue()
         elif action == Actions.COLLECT.value:
@@ -23,5 +24,3 @@ class FireRescueBaseline(FireRescueEnv):
 
         if diamond_collected:
             reward_vector[TaskIdx.DIAMOND.value] += 1
-        
-

@@ -75,10 +75,10 @@ class ECCPQL(MOAgent):
 
         # Safety objectives: indices [1, 2, 3] (sentient, classical, hedonistic)
         # Fairness objectives: indices [4, 5, 6] (equal, proportional, minimum)
-        self.safety_objectives = [1, 2, 3]
-        self.fairness_objectives = [4, 5, 6]
-        self.num_safety_objectives = 3
-        self.num_fairness_objectives = 3
+        self.safety_objectives = [0, 1]
+        self.fairness_objectives = [2, 3]
+        self.num_safety_objectives = 2
+        self.num_fairness_objectives = 2
 
         if isinstance(self.env.action_space, gym.spaces.Discrete):
             self.num_actions = self.env.action_space.n
@@ -326,7 +326,12 @@ class ECCPQL(MOAgent):
             Set[Tuple]: The non-dominated vectors.
         """
 
-        candidates = set().union(*[self.get_q_set(avg_reward, non_dominated, state, action) for action in range(self.num_actions)])
+        candidates = set().union(
+            *[
+                self.get_q_set(avg_reward, non_dominated, state, action)
+                for action in range(self.num_actions)
+            ]
+        )
         non_dominated = get_non_dominated(candidates)
         return non_dominated
 
@@ -341,8 +346,12 @@ class ECCPQL(MOAgent):
         """
         action_scores = np.zeros(self.num_actions)
         for action in range(self.num_actions):
-            safety_q_set = self.get_q_set(self.safety_avg_reward, self.safety_non_dominated, state, action)
-            fairness_q_set = self.get_q_set(self.fairness_avg_reward, self.fairness_non_dominated, state, action)
+            safety_q_set = self.get_q_set(
+                self.safety_avg_reward, self.safety_non_dominated, state, action
+            )
+            fairness_q_set = self.get_q_set(
+                self.fairness_avg_reward, self.fairness_non_dominated, state, action
+            )
 
             safety_hv = hypervolume(self.safety_ref_point, list(safety_q_set))
             fairness_hv = hypervolume(self.fairness_ref_point, list(fairness_q_set))
@@ -699,8 +708,8 @@ class ECCPQL(MOAgent):
             new_target = target
 
             for action in range(self.num_actions):
-                im_rew = self.safety_avg_reward[state, action]
-                non_dominated_set = self.safety_non_dominated[state, action]
+                im_rew = self.safety_avg_reward[state][action]
+                non_dominated_set = self.safety_non_dominated[state][ action]
 
                 for q in non_dominated_set:
                     q = np.array(q)

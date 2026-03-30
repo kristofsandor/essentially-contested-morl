@@ -10,7 +10,7 @@ def test():
     print("Creating MO-Gymnasium environment...")
     # Create DeepSeaTreasure environment from MO-Gymnasium
     env = mo_gym.make("deep-sea-treasure-v0")
-    
+
     print(f"Environment: {env.unwrapped.spec.id}")
     print(f"Observation space: {env.observation_space}")
     print(f"Action space: {env.action_space}")
