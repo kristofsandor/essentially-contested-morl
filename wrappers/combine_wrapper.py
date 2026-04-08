@@ -13,8 +13,8 @@ class CombineWrapper(gym.RewardWrapper):
         super().__init__(env)
         self.env = env
         self.env.unwrapped.reward_space = Box(
-            low=np.array([-1.0, 0.0]),
-            high=np.array([0.0, 1.0]),
+            low=np.array([-1.0, 0.0], dtype=np.float32),
+            high=np.array([0.0, 1.0], dtype=np.float32),
             shape=(2,),
             dtype=np.float32,
         )

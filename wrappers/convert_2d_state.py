@@ -9,19 +9,12 @@ from gymnasium import spaces
 
 class Convert2DStateWrapper(gym.ObservationWrapper):
     """
-    Observation wrapper that converts a 4D vector observation
-    [row, col, has_gold, has_diamond] into a single Discrete index
-    over a 2D meta-grid suitable for PQL.
+    Observation wrapper that converts vector observations into
+    a compact 2D state [row, col] suitable for tabular algorithms
+    such as PQL.
 
-    Meta-grid layout:
-        - Base grid: rows x cols (agent position).
-        - Meta-rows: 2 * rows  (top: no gold, bottom: has gold).
-        - Meta-cols: 2 * cols  (left: no diamond, right: has diamond).
-
-    Mapping:
-        meta_row = row + has_gold * rows
-        meta_col = col + has_diamond * cols
-        index    = meta_row * (2 * cols) + meta_col
+    This intentionally keeps only the first two coordinates and
+    discards additional inventory/features dimensions.
     """
 
     def __init__(self, env: gym.Env):
@@ -31,8 +24,8 @@ class Convert2DStateWrapper(gym.ObservationWrapper):
         self._rows = int(rows)
         self._cols = int(cols)
 
-        # 2d location on the grid
-        self.observation_space = spaces.MultiDiscrete([2 * self._rows, 2 * self._cols])
+        # 2D location on the grid
+        self.observation_space = spaces.MultiDiscrete([self._rows, self._cols])
 
     @staticmethod
     def _infer_grid_shape(env: gym.Env) -> Tuple[int, int]:
@@ -41,12 +34,19 @@ class Convert2DStateWrapper(gym.ObservationWrapper):
 
         Preference:
             1. Use env.map.shape if available.
-            2. Fall back to env.size assuming a square grid.
+            2. Use env.maze.shape if available.
+            3. Fall back to env.size assuming a square grid.
         """
         if hasattr(env.unwrapped, "map") and isinstance(getattr(env.unwrapped, "map"), np.ndarray):
             shape = env.unwrapped.map.shape
             if len(shape) != 2:
                 raise ValueError(f"Expected 2D map, got shape {shape}")
+            return int(shape[0]), int(shape[1])
+
+        if hasattr(env.unwrapped, "maze") and isinstance(getattr(env.unwrapped, "maze"), np.ndarray):
+            shape = env.unwrapped.maze.shape
+            if len(shape) != 2:
+                raise ValueError(f"Expected 2D maze, got shape {shape}")
             return int(shape[0]), int(shape[1])
 
         if hasattr(env.unwrapped, "size"):
@@ -60,14 +60,8 @@ class Convert2DStateWrapper(gym.ObservationWrapper):
 
     def observation(self, observation: Any):
         """
-        Convert [row, col, has_gold, has_diamond] into a single index.
+        Convert any vector-like observation into [row, col].
         """
         row = int(observation[0])
         col = int(observation[1])
-        has_gold = int(observation[2])
-        has_diamond = int(observation[3])
-
-        meta_row = row + has_gold * self._rows
-        meta_col = col + has_diamond * self._cols
-
-        return np.array([meta_row, meta_col])
+        return np.array([row, col], dtype=np.int32)
