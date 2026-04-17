@@ -40,7 +40,7 @@ def eval_policy(
     eval_mode="ser",
     scalarization=weighted_sum,
     log=True,
-) -> np.ndarray, np.ndarray:
+):
     """Evaluates a policy.
 
     Args:
