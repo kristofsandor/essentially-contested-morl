@@ -16,6 +16,7 @@ ref_point = np.array([-1, -1, -2])
 # env = MOSyncVectorEnv([lambda: mo_gym.make("resource-gathering-v0")])
 # env = MORecordEpisodeStatistics(env, gamma=GAMMA)
 env = mo_gym.make("resource-gathering-v0")
+from mo_gymnasium.envs.resource_gathering import ResourceGatheringEnv
 
 eval_env = mo_gym.make("resource-gathering-v0")
 

@@ -21,11 +21,6 @@ class CombineWrapper(gym.RewardWrapper):
         self.weight = weight
 
     def reward(self, reward):
-        # new_reward = np.array([0, 0])
-        # harm
         new_reward = np.dot(self.weight, reward.reshape(2,2).T)
-        # new_reward[0] = 0.1 * reward[0] + 0.9 * reward[1]
-        # # rich
-        # new_reward[1] = 0.1 * reward[2] + 0.9 * reward[3]
 
         return new_reward
