@@ -16,12 +16,13 @@ from morl_baselines.multi_policy.morld.morld import Policy
 from pymoo.util.ref_dirs import get_reference_directions
 import wandb
 
+from utils.config import MAX_EPISODE_LENGTH
 from utils.visualize_front import visualize_front_general
 
 
 def eval_full_four_room(agent):
     test_env = gym.wrappers.TimeLimit(
-        gym.make("my-four-room-v0"), max_episode_steps=8
+        gym.make("my-four-room-v0"), max_episode_steps=MAX_EPISODE_LENGTH
     )
     evals, archive = eval_all_policies(
         population=agent.population, eval_env=test_env, ref_point=np.array([0, 0, 0, 0])
@@ -55,7 +56,7 @@ def eval_policy(
         num_episodes=num_eval_episodes_for_front,
         weights=np.array([0.25] * 4),
         scalarization=scalarization,
-        log=log,
+        log=False,
     )
     return reward, discounted_reward
 

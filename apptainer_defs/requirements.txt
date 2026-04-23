@@ -1,0 +1,29 @@
+# Python package requirements for pip installation
+# These are installed after conda packages via environment.yml
+#
+# Add your packages below
+
+# Example packages (uncomment and modify as needed):
+#
+# PyTorch with CUDA (adjust CUDA version as needed):
+# --extra-index-url https://download.pytorch.org/whl/cu121
+# torch==2.2.0
+# torchvision==0.17.0
+# torchaudio==2.2.0
+#
+# Data Science:
+# numpy==1.26.4
+# pandas==2.2.0
+# matplotlib==3.8.2
+# seaborn==0.13.2
+# scikit-learn==1.4.0
+#
+# ML/AI:
+# transformers==4.37.0
+# datasets==2.16.0
+#
+# Utilities:
+# tqdm==4.66.1
+# plotly==5.18.0
+# requests==2.31.0
+

@@ -22,5 +22,6 @@ class CombineWrapper(gym.RewardWrapper):
 
     def reward(self, reward):
         new_reward = np.dot(self.weight, reward.reshape(2,2).T)
+        print(f"original reward {reward}, new reward from combine wrapper: {new_reward}")
 
         return new_reward

@@ -1,0 +1,43 @@
+Bootstrap: docker
+From: python:3.12-slim
+
+%labels
+    Author kristofasandor
+    Description Apptainer image for running run_code/morld_four_room.py with Python 3.12
+
+%help
+    Build:
+        apptainer build morld_py312.sif apptainer_defs/Apptainer.morld_py312.def
+
+    Run (default):
+        apptainer run morld_py312.sif
+
+    Override command:
+        apptainer exec morld_py312.sif python /app/run_code/morld_four_room.py
+
+%files
+    requirements.txt /tmp/requirements.txt
+    run_code/morld_four_room.py /app/run_code/morld_four_room.py
+    env /app/env
+    utils /app/utils
+    wrappers /app/wrappers
+
+%post
+    set -e
+
+    apt-get update && \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential \
+            git \
+            && rm -rf /var/lib/apt/lists/*
+
+    python -m pip install --upgrade pip
+    python -m pip install --no-cache-dir -r /tmp/requirements.txt
+
+%environment
+    export PYTHONUNBUFFERED=1
+    export PYTHONPATH=/app
+    WANDB_API_KEY=$WANDB_API_KEY
+
+%runscript
+    exec python /app/run_code/morld_four_room.py

@@ -1,0 +1,41 @@
+# Conda environment specification for Apptainer container
+# This environment is automatically activated when the container starts
+
+name: apptainer
+
+channels:
+  - conda-forge  # Community-driven, open source package repository
+
+dependencies:
+  # Python version - Pin to specific version for reproducibility
+  - python=3.11
+
+  # JupyterLab for interactive computing
+  - jupyterlab
+
+  # Pip package manager (required for pip dependencies below)
+  - pip
+
+  # Add your conda packages below:
+  #
+  # Data Science essentials:
+  # - numpy
+  # - pandas
+  # - matplotlib
+  # - seaborn
+  # - scikit-learn
+  # - scipy
+  #
+  # Jupyter extensions:
+  # - ipywidgets
+  # - jupyterlab-git
+  #
+  # Development tools:
+  # - black
+  # - pytest
+  # - mypy
+
+  # Pip-installed packages (from requirements.txt)
+  - pip:
+    - -r requirements.txt
+
