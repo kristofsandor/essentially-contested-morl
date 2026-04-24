@@ -7,9 +7,9 @@ concept's interpretations.
 Concept definitions for MyFourRoom
 -----------------------------------
 The environment emits a 4-D reward vector:
-    index 0 — blue_triangle   ┐ Concept A (e.g. "colour-blue" interpretation)
+    index 0 — blue_triangle   ┐ Concept A (e.g. "color-blue" interpretation)
     index 1 — blue_circle     ┘   priority: blue_triangle > blue_circle
-    index 2 — red_triangle    ┐ Concept B (e.g. "colour-red" interpretation)
+    index 2 — red_triangle    ┐ Concept B (e.g. "color-red" interpretation)
     index 3 — red_circle      ┘   priority: red_triangle > red_circle
 
 After wrapping with LexRewardWrapper the agent receives a 2-D vector:

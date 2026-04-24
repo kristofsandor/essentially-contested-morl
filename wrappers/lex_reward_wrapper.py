@@ -7,10 +7,12 @@ separated weight vector.  The outer MORL algorithm (e.g., MORLD) then maintains 
 
 Strict lexicographic ordering guarantee
 ----------------------------------------
-Given a concept with k interpretations [o_1, o_2, ..., o_k] (in priority order) whose cumulative
-discounted returns each lie in [r_min, r_max], setting
+Given a concept with k interpretations [o_1, o_2, ..., o_k] (in priority order) whose
+per-step rewards lie in [r_min, r_max], setting
 
-    M  >  (r_max - r_min) / (1 - gamma^T)   ... for finite-horizon T
+    M  >  (r_max - r_min) * T   ... for undiscounted finite-horizon T
+
+(or, with discount factor gamma: M > (r_max - r_min) * (1 - gamma^T) / (1 - gamma))
 
 ensures that the composite scalar
 
@@ -19,8 +21,8 @@ ensures that the composite scalar
 preserves strict lexicographic preference: any policy that achieves a strictly higher
 expected return on o_i will always score higher on lex_value, regardless of o_{i+1}, ..., o_k.
 
-For bounded integer / binary rewards (0 or 1 per step) with episode length T, the default
-lex_scale = T + 1  is sufficient and recommended.
+For binary rewards (0 or 1 per step) with episode length T, using M = T + 1 satisfies
+the undiscounted bound and is the recommended default.
 """
 
 from typing import List, Optional, Tuple
