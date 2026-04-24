@@ -246,7 +246,8 @@ class MyFourRoom(gym.Env, EzPickle):
                 y, x = s1
                 shape_index = self.all_shapes[self.maze[y, x]]
                 phi[shape_index] = 1.0
-                print(f"collected shape {self.maze[y, x]} at position {s1} with index {shape_index}, got reward: {phi}")
+                print(f"collected shape {self.maze[y, x]} at position {s1} with index {shape_index}")
+                print(f"env sending reward {phi}")
         elif s1 == self.goal:
             phi[nc] = np.zeros(nc, dtype=np.float32)
         return phi
@@ -270,8 +271,9 @@ class MyFourRoom(gym.Env, EzPickle):
 
         pygame.font.init()
         self.font = pygame.font.SysFont(None, 48)
-        img = self.font.render("G", True, BLACK)
-        canvas.blit(img, (np.array(self.goal)[::-1] + 0.15) * pix_square_size)
+        if self.goal is not None:
+            img = self.font.render("G", True, BLACK)
+            canvas.blit(img, (np.array(self.goal)[::-1] + 0.15) * pix_square_size)
         img = self.font.render("S", True, BLACK)
         canvas.blit(img, (np.array(self.initial[0])[::-1] + 0.15) * pix_square_size)
 
