@@ -1,0 +1,26 @@
+Bootstrap: docker
+From: nvidia/cuda:13.2.1-cudnn-devel-ubuntu22.04
+
+%labels
+    Author kristofasandor
+    Description Apptainer image for running run_code/gpipd_four_room.py with Python 3.12
+
+%files
+    requirements.txt /tmp/requirements.txt
+    run_code/gpipd_four_room.py /app/run_code/gpipd_four_room.py
+    env /app/env
+    utils /app/utils
+    wrappers /app/wrappers
+
+%post
+    apt-get update 
+
+    python -m pip install --upgrade pip
+    python -m pip install --no-cache-dir -r /tmp/requirements.txt
+
+%environment
+    export PYTHONUNBUFFERED=1
+    export PYTHONPATH=/app
+
+%runscript
+    exec python /app/run_code/gpipd_four_room.py

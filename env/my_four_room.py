@@ -246,8 +246,8 @@ class MyFourRoom(gym.Env, EzPickle):
                 y, x = s1
                 shape_index = self.all_shapes[self.maze[y, x]]
                 phi[shape_index] = 1.0
-                print(f"collected shape {self.maze[y, x]} at position {s1} with index {shape_index}")
-                print(f"env sending reward {phi}")
+                # print(f"collected shape {self.maze[y, x]} at position {s1} with index {shape_index}")
+                # print(f"env sending reward {phi}")
         elif s1 == self.goal:
             phi[nc] = np.zeros(nc, dtype=np.float32)
         return phi

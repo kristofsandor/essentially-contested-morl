@@ -26,6 +26,7 @@ def visualize_front_general(pareto_front, columns):
                         x=columns[i],
                         y=columns[j],
                         title=f"Pareto front: {columns[i]} vs {columns[j]}",
+
                     )
                 }
             )
@@ -33,6 +34,8 @@ def visualize_front_general(pareto_front, columns):
             ax.scatter(pf_arr[:, i], pf_arr[:, j], color="black")
             ax.set_xlabel(columns[i])
             ax.set_ylabel(columns[j])
+            ax.set_xlim(0, 4)
+            ax.set_ylim(0, 4)
             ax.set_title(f"Pareto front: {columns[i]} vs {columns[j]}")
                         
             pair_count += 1
