@@ -6,21 +6,32 @@ From: nvidia/cuda:13.2.1-cudnn-devel-ubuntu22.04
     Description Apptainer image for running run_code/gpipd_four_room.py with Python 3.12
 
 %files
-    requirements.txt /tmp/requirements.txt
+    requirements.txt /app/requirements.txt
     run_code/gpipd_four_room.py /app/run_code/gpipd_four_room.py
     env /app/env
     utils /app/utils
     wrappers /app/wrappers
 
 %post
-    apt-get update 
+    apt-get update && apt-get install -y curl && apt-get clean
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="/root/.local/bin:$PATH"
 
-    python -m pip install --upgrade pip
-    python -m pip install --no-cache-dir -r /tmp/requirements.txt
+    uv python install 3.12
+
+    # create venv explicitly
+    uv venv /app/.venv --python 3.12
+    export VIRTUAL_ENV=/app/.venv
+    export PATH="/app/.venv/bin:$PATH"
+
+    # install deps
+    uv pip install -r /app/requirements.txt
 
 %environment
     export PYTHONUNBUFFERED=1
     export PYTHONPATH=/app
+    export VIRTUAL_ENV=/app/.venv
+    export PATH="/root/.local/bin:/app/.venv/bin:$PATH"
 
 %runscript
-    exec python /app/run_code/gpipd_four_room.py
+    exec uv run python /app/run_code/gpipd_four_room.py "$@"
