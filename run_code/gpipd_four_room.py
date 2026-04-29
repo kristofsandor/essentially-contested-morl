@@ -36,7 +36,7 @@ from wrappers.combine_wrapper import CombineWrapper
 # ---------------------------------------------------------------------------
 
 # ── Training budget ─────────────────────────────────────────────────────────
-TOTAL_TIMESTEPS = int(1e4)
+TOTAL_TIMESTEPS = int(3e4)
 # 100 000 environment steps is enough to see meaningful convergence on this
 # small (5×5) grid while keeping wall-clock time reasonable (a few minutes
 # on CPU).
@@ -71,7 +71,7 @@ GRADIENT_UPDATES = 10
 # The default (20) is appropriate for harder environments; 10 is sufficient
 # here and halves training time.
 
-LEARNING_STARTS = 500
+LEARNING_STARTS = 250
 # Collect 500 random transitions before the first gradient update so that the
 # replay buffer already contains some diversity.
 
@@ -81,7 +81,7 @@ NET_ARCH = [64, 64]
 # network than the default (4×256) converges faster and is less prone to
 # overfitting.
 
-TARGET_NET_UPDATE_FREQ = 500
+TARGET_NET_UPDATE_FREQ = 250
 # Hard-copy the online Q-network to the target network every 500 steps.
 # This stabilises training while still providing reasonably fresh targets.
 
@@ -95,7 +95,7 @@ FINAL_EPSILON = 0.05
 # local optima (the grid has multiple shapes, so greedy behaviour can miss
 # entire rooms).
 
-EPSILON_DECAY_STEPS = int(5e4)
+EPSILON_DECAY_STEPS = TOTAL_TIMESTEPS // 2
 # Linearly anneal epsilon over the first half of training.
 
 # ── Dyna (model-based rollouts) ───────────────────────────────────────────────
@@ -152,7 +152,7 @@ GPI_PD = True
 # the GPI improvement signal rather than per-policy TD error alone.
 
 # ── Training / evaluation schedule ──────────────────────────────────────────
-TIMESTEPS_PER_ITER = 10000
+TIMESTEPS_PER_ITER = TOTAL_TIMESTEPS // 10
 # Each outer iteration trains for 10 000 steps then picks a new weight vector.
 # With TOTAL_TIMESTEPS = 1e5 this gives 10 outer iterations.
 
@@ -163,7 +163,7 @@ EVAL_MO_FREQ = 10000
 # Run the full multi-objective evaluation (hypervolume, EUM, etc.) every
 # 10 000 steps – once per outer iteration.
 
-NUM_EVAL_WEIGHTS_FOR_FRONT = 100
+NUM_EVAL_WEIGHTS_FOR_FRONT = 25
 # Sample 100 uniformly-spaced weight vectors to approximate the Pareto front
 # at evaluation time.
 
@@ -172,10 +172,7 @@ NUM_EVAL_EPISODES_FOR_FRONT = 5
 # average out stochastic starting positions in the four-room grid.
 
 # ── Reference point (hypervolume lower bound) ────────────────────────────────
-# The worst possible outcome per objective is 0 collected shapes (all
-# objectives are in [0, max_shapes]).  Using [0, 0, 0, 0] as the reference
-# point is therefore valid and measures the full hypervolume above the origin.
-REF_POINT = np.array([0.0, 0.0, 0.0, 0.0])
+REF_POINT = np.array([0.0, 0.0])
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 LOG = True
@@ -186,146 +183,86 @@ EXPERIMENT_NAME = "GPI-PD"
 PROJECT_NAME = "MORL-Baselines"
 SEED = 42
 
-triangle_weight = [1, 0]
+interp_weights = np.linspace(0, 1, 5)
 
-train_env = CombineWrapper(gym.wrappers.TimeLimit(
-    gym.make("my-four-room-v0"),
-    max_episode_steps=MAX_EPISODE_LENGTH,
-), [1, 0])
+for triangle_weight in interp_weights:
+    circle_weight = 1 - triangle_weight
+    interp_weight = np.array([triangle_weight, circle_weight])
 
-eval_env = CombineWrapper(gym.wrappers.TimeLimit(
-    gym.make("my-four-room-v0"),
-    max_episode_steps=MAX_EPISODE_LENGTH,
-), [1, 0])
+    train_env = CombineWrapper(gym.wrappers.TimeLimit(
+        gym.make("my-four-room-v0"),
+        max_episode_steps=MAX_EPISODE_LENGTH,
+    ), interp_weight)
 
-# ---------------------------------------------------------------------------
-# Agent
-# ---------------------------------------------------------------------------
-agent = GPIPD(
-    env=train_env,
-    # Q-learning
-    learning_rate=LEARNING_RATE,
-    gamma=GAMMA,
-    batch_size=BATCH_SIZE,
-    buffer_size=BUFFER_SIZE,
-    gradient_updates=GRADIENT_UPDATES,
-    learning_starts=LEARNING_STARTS,
-    net_arch=NET_ARCH,
-    target_net_update_freq=TARGET_NET_UPDATE_FREQ,
-    # Exploration
-    initial_epsilon=INITIAL_EPSILON,
-    final_epsilon=FINAL_EPSILON,
-    epsilon_decay_steps=EPSILON_DECAY_STEPS,
-    # Dyna
-    dyna=DYNA,
-    dynamics_rollout_starts=DYNAMICS_ROLLOUT_STARTS,
-    dynamics_rollout_freq=DYNAMICS_ROLLOUT_FREQ,
-    dynamics_rollout_len=DYNAMICS_ROLLOUT_LEN,
-    dynamics_rollout_batch_size=DYNAMICS_ROLLOUT_BATCH_SIZE,
-    dynamics_net_arch=DYNAMICS_NET_ARCH,
-    dynamics_ensemble_size=DYNAMICS_ENSEMBLE_SIZE,
-    dynamics_num_elites=DYNAMICS_NUM_ELITES,
-    real_ratio=REAL_RATIO,
-    # PER
-    per=PER,
-    alpha_per=ALPHA_PER,
-    # Multi-objective / GPI
-    use_gpi=USE_GPI,
-    gpi_pd=GPI_PD,
-    # Logging / misc
-    log=LOG,
-    experiment_name=EXPERIMENT_NAME,
-    project_name=PROJECT_NAME,
-    seed=SEED,
-)
+    eval_env = CombineWrapper(gym.wrappers.TimeLimit(
+        gym.make("my-four-room-v0"),
+        max_episode_steps=MAX_EPISODE_LENGTH,
+    ), interp_weight)
 
-wandb.log({"interp_weight": triangle_weight})
-agent.close_wandb = lambda: None # prevent agent from closing W&B run at the end of training
+    # ---------------------------------------------------------------------------
+    # Agent
+    # ---------------------------------------------------------------------------
+    agent = GPIPD(
+        env=train_env,
+        # Q-learning
+        learning_rate=LEARNING_RATE,
+        gamma=GAMMA,
+        batch_size=BATCH_SIZE,
+        buffer_size=BUFFER_SIZE,
+        gradient_updates=GRADIENT_UPDATES,
+        learning_starts=LEARNING_STARTS,
+        net_arch=NET_ARCH,
+        target_net_update_freq=TARGET_NET_UPDATE_FREQ,
+        # Exploration
+        initial_epsilon=INITIAL_EPSILON,
+        final_epsilon=FINAL_EPSILON,
+        epsilon_decay_steps=EPSILON_DECAY_STEPS,
+        # Dyna
+        dyna=DYNA,
+        dynamics_rollout_starts=DYNAMICS_ROLLOUT_STARTS,
+        dynamics_rollout_freq=DYNAMICS_ROLLOUT_FREQ,
+        dynamics_rollout_len=DYNAMICS_ROLLOUT_LEN,
+        dynamics_rollout_batch_size=DYNAMICS_ROLLOUT_BATCH_SIZE,
+        dynamics_net_arch=DYNAMICS_NET_ARCH,
+        dynamics_ensemble_size=DYNAMICS_ENSEMBLE_SIZE,
+        dynamics_num_elites=DYNAMICS_NUM_ELITES,
+        real_ratio=REAL_RATIO,
+        # PER
+        per=PER,
+        alpha_per=ALPHA_PER,
+        # Multi-objective / GPI
+        use_gpi=USE_GPI,
+        gpi_pd=GPI_PD,
+        # Logging / misc
+        log=LOG,
+        experiment_name=EXPERIMENT_NAME,
+        project_name=PROJECT_NAME,
+        seed=SEED,
+    )
 
-# ---------------------------------------------------------------------------
-# Training
-# ---------------------------------------------------------------------------
-agent.train(
-    total_timesteps=TOTAL_TIMESTEPS,
-    eval_env=eval_env,
-    ref_point=REF_POINT,
-    timesteps_per_iter=TIMESTEPS_PER_ITER,
-    weight_selection_algo="gpi-ls",  # iteratively focus on under-explored
-                                      # regions of the Pareto front
-    eval_freq=EVAL_FREQ,
-    eval_mo_freq=EVAL_MO_FREQ,
-    num_eval_weights_for_front=NUM_EVAL_WEIGHTS_FOR_FRONT,
-    num_eval_episodes_for_front=NUM_EVAL_EPISODES_FOR_FRONT,
-    checkpoints=False,
-)
+    # wandb.log({"interp_weight": interp_weight })
+    agent.close_wandb = lambda: None # prevent agent from closing W&B run at the end of training
 
-import time
+    # ---------------------------------------------------------------------------
+    # Training
+    # ---------------------------------------------------------------------------
+    agent.train(
+        total_timesteps=TOTAL_TIMESTEPS,
+        eval_env=eval_env,
+        ref_point=REF_POINT,
+        timesteps_per_iter=TIMESTEPS_PER_ITER,
+        weight_selection_algo="gpi-ls",  # iteratively focus on under-explored
+                                        # regions of the Pareto front
+        eval_freq=EVAL_FREQ,
+        eval_mo_freq=EVAL_MO_FREQ,
+        num_eval_weights_for_front=NUM_EVAL_WEIGHTS_FOR_FRONT,
+        num_eval_episodes_for_front=NUM_EVAL_EPISODES_FOR_FRONT,
+        checkpoints=False,
+    )
 
-run_id = wandb.run.id
-env_id = train_env.spec.id
-full_experiment_name = f"run_{run_id}__{env_id}__{agent.experiment_name}__{agent.seed}__{int(time.time())}"
-agent.save(filename=full_experiment_name)
+    agent.save(filename=f"gpipd_four_room_{interp_weight[0]}_{interp_weight[1]}_{wandb.run.id}")
+    eval_full_room_gpipd(agent, n_weights=25, n_episodes_per_weight=5)
 
-train_env.close()
-eval_env.close()
-
-# Approximate Pareto front from a trained GPIPD/GPILS agent
-from morl_baselines.common.evaluation import policy_evaluation_mo
-from morl_baselines.common.weights import equally_spaced_weights
-from morl_baselines.common.pareto import filter_pareto_dominated
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-
-N_WEIGHTS = 25
-N_EPISODES_PER_WEIGHT = 5
-
-# Evaluate the trained policy set for many preference weights
-eval_weights = equally_spaced_weights(agent.reward_dim, n=N_WEIGHTS)
-returns = np.array(
-    [policy_evaluation_mo(agent, eval_env, w, rep=N_EPISODES_PER_WEIGHT)[3] for w in eval_weights],
-    dtype=np.float32,
- )
-
-# Keep only non-dominated points (Pareto front approximation)
-pareto_front = np.array(list(filter_pareto_dominated(returns)), dtype=np.float32)
-
-print(f"Collected points: {len(returns)}")
-print(f"Non-dominated points: {len(pareto_front)}")
-print("Pareto front shape:", pareto_front.shape)
-
-# Sort for cleaner plotting in 2D
-if pareto_front.shape[1] == 2:
-    pareto_front = pareto_front[np.argsort(pareto_front[:, 0])]
-
-# Plot
-if pareto_front.shape[1] == 2:
-    plt.figure(figsize=(6, 5))
-    plt.scatter(returns[:, 0], returns[:, 1], s=12, alpha=0.25, label="all eval points")
-    plt.plot(pareto_front[:, 0], pareto_front[:, 1], "o-", color="black", label="pareto front")
-    plt.xlabel("blue_triangle")
-    plt.ylabel("red_triangle")
-    plt.title("Approximated Pareto Front")
-    plt.legend()
-    plt.grid(True, alpha=0.2)
-    plt.show()
-elif pareto_front.shape[1] == 3:
-    fig = plt.figure(figsize=(7, 6))
-    ax = fig.add_subplot(111, projection="3d")
-    ax.scatter(pareto_front[:, 0], pareto_front[:, 1], pareto_front[:, 2], s=20)
-    ax.set_xlabel("objective_1")
-    ax.set_ylabel("objective_2")
-    ax.set_zlabel("objective_3")
-    ax.set_title("Approximated Pareto Front")
-    plt.show()
-else:
-    print("Front has", pareto_front.shape[1], "objectives; skipping plot.")
-
-# Optional: save to CSV
-# front_df = pd.DataFrame(pareto_front, columns=[f"objective_{i+1}" for i in range(pareto_front.shape[1])])
-# front_df.to_csv("run_code/gpipd_pareto_front.csv", index=False)
-# front_df.head()
-
-eval_full_room_gpipd(agent, n_weights=25, n_episodes_per_weight=5)
-
-wandb.finish()
+    train_env.close()
+    eval_env.close()
+    wandb.finish()

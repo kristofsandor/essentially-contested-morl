@@ -31,7 +31,9 @@ def visualize_front_general(pareto_front, columns):
                 }
             )
             ax = axs[pair_count]
-            ax.scatter(pf_arr[:, i], pf_arr[:, j], color="black")
+            # connect dots: sort by x (columns[i]) so the line follows increasing x
+            order = np.argsort(pf_arr[:, i])
+            ax.plot(pf_arr[order, i], pf_arr[order, j], "o-", color="black")
             ax.set_xlabel(columns[i])
             ax.set_ylabel(columns[j])
             ax.set_xlim(0, 4)
