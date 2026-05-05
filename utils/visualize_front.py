@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-def visualize_front_general(pareto_front, columns):
+def visualize_front_general(pareto_front, columns, filename="Pareto_front.png"):
     pf_arr = np.array((list(pareto_front)))
 
     # 1) Build a W&B table
@@ -42,7 +42,7 @@ def visualize_front_general(pareto_front, columns):
                         
             pair_count += 1
 
-    plt.show()
+    plt.savefig(filename)
     plt.close(fig)
     return fig
 

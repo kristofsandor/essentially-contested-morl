@@ -22,7 +22,7 @@ import wandb
 from utils.config import MAX_EPISODE_LENGTH
 from utils.visualize_front import visualize_front_general
 
-def eval_full_room_gpipd(agent, n_weights=25, n_episodes_per_weight=5, render=False):
+def eval_full_room_gpipd(agent, n_weights=25, n_episodes_per_weight=5, filename="", render=False):
     """Evaluates for different weights"""
     eval_weights = equally_spaced_weights(agent.reward_dim, n=n_weights)
     test_env = gym.wrappers.TimeLimit(
@@ -63,7 +63,7 @@ def eval_full_room_gpipd(agent, n_weights=25, n_episodes_per_weight=5, render=Fa
     pf_idxs = get_non_dominated_inds(returns[:, 2:6])  # get non-dominated indices based on avg_vec_return
     returns_pf = returns[pf_idxs][:, 2:6]  # get the avg_vec_return of the non-dominated policies
 
-    visualize_front_general(returns_pf, columns=["blue_triangle", "blue_circle", "red_triangle", "red_circle"])
+    visualize_front_general(returns_pf, columns=["blue_triangle", "blue_circle", "red_triangle", "red_circle"], filename=filename)
 
     log_all_multi_policy_metrics(
         current_front=returns_pf,

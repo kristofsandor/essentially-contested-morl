@@ -1,0 +1,17 @@
+*.csv
+*.ipynb
+*.html
+test_*.py
+debug_*.py
+eval_*.py
+main.py
+pql_delivery.py
+gpi_pd_delivery.py
+resource_gather.py
+wandb/
+.git/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/

@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: nvidia/cuda:13.2.1-cudnn-devel-ubuntu22.04
+From: ubuntu22.04
 
 %labels
     Author kristofasandor
@@ -13,7 +13,10 @@ From: nvidia/cuda:13.2.1-cudnn-devel-ubuntu22.04
     wrappers /app/wrappers
 
 %post
-    apt-get update && apt-get install -y curl && apt-get clean
+    apt-get update && apt-get install -y curl
+    apt-get install -y git && apt-get clean
+    
+        # install uv
     curl -LsSf https://astral.sh/uv/install.sh | sh
     export PATH="/root/.local/bin:$PATH"
 
@@ -25,7 +28,10 @@ From: nvidia/cuda:13.2.1-cudnn-devel-ubuntu22.04
     export PATH="/app/.venv/bin:$PATH"
 
     # install deps
-    uv pip install -r /app/requirements.txt
+    uv pip install pycddlib-standalone 
+    uv pip install pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+    uv pip install gymnasium mo-gymnasium tqdm numpy matplotlib pymoo wandb ipywidgets cvxpy fire imageio moviepy pygame pymoo scipy seaborn sortedcontainers torch wandb
+    uv pip install git+https://github.com/LucasAlegre/morl-baselines.git --no-deps
 
 %environment
     export PYTHONUNBUFFERED=1

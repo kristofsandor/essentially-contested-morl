@@ -14,9 +14,10 @@ The four-room environment has a 4-dimensional reward vector:
 All rewards are +1 when the corresponding shape is collected, 0 otherwise.
 """
 
-import sys
 import os
+
 import wandb
+
 
 # ---------------------------------------------------------------------------
 # Make sure the repo root is on the Python path so that the local `env`,
@@ -26,7 +27,8 @@ import wandb
 import gymnasium as gym
 import numpy as np
 
-import env  # noqa: F401  – registers "my-four-room-v0" as a side-effect
+
+from env import *  # noqa: F401  – registers "my-four-room-v0" as a side-effect
 from morl_baselines.multi_policy.gpi_pd.gpi_pd import GPIPD
 from utils.eval import eval_full_room_gpipd
 from wrappers.combine_wrapper import CombineWrapper
@@ -153,7 +155,7 @@ GPI_PD = True
 
 # ── Training / evaluation schedule ──────────────────────────────────────────
 TIMESTEPS_PER_ITER = TOTAL_TIMESTEPS // 10
-# Each outer iteration trains for 10 000 steps then picks a new weight vector.
+# Each outer iteration trains for 3000 steps then picks a new weight vector.
 # With TOTAL_TIMESTEPS = 1e5 this gives 10 outer iterations.
 
 EVAL_FREQ = 2000
@@ -172,7 +174,7 @@ NUM_EVAL_EPISODES_FOR_FRONT = 5
 # average out stochastic starting positions in the four-room grid.
 
 # ── Reference point (hypervolume lower bound) ────────────────────────────────
-REF_POINT = np.array([0.0, 0.0])
+REF_POINT = np.array([-0.1, -0.1])
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 LOG = True
@@ -183,21 +185,83 @@ EXPERIMENT_NAME = "GPI-PD"
 PROJECT_NAME = "MORL-Baselines"
 SEED = 42
 
-interp_weights = np.linspace(0, 1, 5)
+import numpy as np
+from scipy.spatial import ConvexHull
+from morl_baselines.multi_policy.linear_support.linear_support import LinearSupport
+
+def scipy_compute_corner_weights(self):
+    """
+    Pure Python/SciPy replacement for the broken pycddlib corner weight calculator.
+    Finds the normals to the facets of the upper convex envelope.
+    """
+    if len(self.ccs) < 2:
+        return []
+        
+    points = np.vstack(self.ccs)
+    
+    # 1. Add anchor points at the origin and extreme axes to close the polygon
+    # This guarantees the ConvexHull forms a complete shape against the axes
+    max_vals = points.max(axis=0)
+    anchors = [
+        np.zeros(self.num_objectives),  # Origin
+        np.array([max_vals[0], 0.0]),   # X-axis anchor
+        np.array([0.0, max_vals[1]])    # Y-axis anchor
+    ]
+    hull_points = np.vstack([points, anchors])
+    
+    try:
+        hull = ConvexHull(hull_points)
+    except Exception:
+        # Fallback if points form a perfectly straight line
+        w = np.random.uniform(0.1, 0.9, self.num_objectives)
+        return [w / w.sum()]
+
+    corners = []
+    
+    # 2. Iterate over the faces (edges) of the convex hull
+    for eq in hull.equations:
+        normal = eq[:-1]
+        
+        # We only care about the "upper right" facing edges 
+        # (normals that point entirely positive in objective space)
+        if np.all(normal >= -1e-5):
+            # Make the normal positive and sum to 1 (a valid weight vector)
+            weight = np.abs(normal)
+            weight_sum = weight.sum()
+            
+            if weight_sum > 1e-5:
+                weight = weight / weight_sum
+                # Don't add extreme boundary weights [1,0] or [0,1] since 
+                # LinearSupport adds those automatically at initialization
+                if 0.001 < weight[0] < 0.999:
+                    corners.append(weight)
+                    
+    return corners
+
+# Completely replace the broken pycddlib method
+LinearSupport.compute_corner_weights = scipy_compute_corner_weights
+
+interp_weights = [1.0]
 
 for triangle_weight in interp_weights:
     circle_weight = 1 - triangle_weight
     interp_weight = np.array([triangle_weight, circle_weight])
 
-    train_env = CombineWrapper(gym.wrappers.TimeLimit(
-        gym.make("my-four-room-v0"),
-        max_episode_steps=MAX_EPISODE_LENGTH,
-    ), interp_weight)
+    train_env = CombineWrapper(
+        gym.wrappers.TimeLimit(
+            gym.make("my-four-room-v0"),
+            max_episode_steps=MAX_EPISODE_LENGTH,
+        ),
+        interp_weight,
+    )
 
-    eval_env = CombineWrapper(gym.wrappers.TimeLimit(
-        gym.make("my-four-room-v0"),
-        max_episode_steps=MAX_EPISODE_LENGTH,
-    ), interp_weight)
+    eval_env = CombineWrapper(
+        gym.wrappers.TimeLimit(
+            gym.make("my-four-room-v0"),
+            max_episode_steps=MAX_EPISODE_LENGTH,
+        ),
+        interp_weight,
+    )
 
     # ---------------------------------------------------------------------------
     # Agent
@@ -235,13 +299,15 @@ for triangle_weight in interp_weights:
         gpi_pd=GPI_PD,
         # Logging / misc
         log=LOG,
-        experiment_name=EXPERIMENT_NAME,
+        experiment_name=EXPERIMENT_NAME + f"_weight_{interp_weight[0]:.2f}_{interp_weight[1]:.2f}",
         project_name=PROJECT_NAME,
         seed=SEED,
     )
 
     # wandb.log({"interp_weight": interp_weight })
-    agent.close_wandb = lambda: None # prevent agent from closing W&B run at the end of training
+    agent.close_wandb = (
+        lambda: None
+    )  # prevent agent from closing W&B run at the end of training
 
     # ---------------------------------------------------------------------------
     # Training
@@ -252,7 +318,7 @@ for triangle_weight in interp_weights:
         ref_point=REF_POINT,
         timesteps_per_iter=TIMESTEPS_PER_ITER,
         weight_selection_algo="gpi-ls",  # iteratively focus on under-explored
-                                        # regions of the Pareto front
+        # regions of the Pareto front
         eval_freq=EVAL_FREQ,
         eval_mo_freq=EVAL_MO_FREQ,
         num_eval_weights_for_front=NUM_EVAL_WEIGHTS_FOR_FRONT,
@@ -260,8 +326,11 @@ for triangle_weight in interp_weights:
         checkpoints=False,
     )
 
-    agent.save(filename=f"gpipd_four_room_{interp_weight[0]}_{interp_weight[1]}_{wandb.run.id}")
-    eval_full_room_gpipd(agent, n_weights=25, n_episodes_per_weight=5)
+    agent.save(
+        filename=f"gpipd_four_room_{interp_weight[0]}_{interp_weight[1]}_{wandb.run.id}"
+    )
+    filename = f"pareto_front_{interp_weight[0]}_{interp_weight[1]}_{wandb.run.id}.png"
+    eval_full_room_gpipd(agent, n_weights=25, n_episodes_per_weight=5, filename=filename, render=False)
 
     train_env.close()
     eval_env.close()
