@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: ubuntu22.04
+From: ubuntu:22.04
 
 %labels
     Author kristofasandor
@@ -13,12 +13,10 @@ From: ubuntu22.04
     wrappers /app/wrappers
 
 %post
-    apt-get update && apt-get install -y curl
-    apt-get install -y git && apt-get clean
+    apt-get update && apt-get install -y curl git build-essential libgmp-dev && apt-get clean
     
-        # install uv
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="/root/.local/bin:$PATH"
+    # install uv
+    curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR="/usr/local/bin" sh
 
     uv python install 3.12
 
@@ -29,7 +27,7 @@ From: ubuntu22.04
 
     # install deps
     uv pip install pycddlib-standalone 
-    uv pip install pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+    uv pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
     uv pip install gymnasium mo-gymnasium tqdm numpy matplotlib pymoo wandb ipywidgets cvxpy fire imageio moviepy pygame pymoo scipy seaborn sortedcontainers torch wandb
     uv pip install git+https://github.com/LucasAlegre/morl-baselines.git --no-deps
 
