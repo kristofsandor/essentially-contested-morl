@@ -219,3 +219,7 @@ moral_paper/
 wandb/
 weights/
 .env
+images/
+results/data/
+results/figures/
+artifacts/
