@@ -56,7 +56,7 @@ class LexTrainParams:
     batch_size: int = 64
 
     # Disable CUDA even if available
-    no_cuda: bool = True
+    no_cuda: bool = False
 
     # How many env steps between gradient updates (LexDQN)
     update_every: int = 4
@@ -91,8 +91,11 @@ class DNN(nn.Module):
         flat_out = int(np.prod(out_size))
         self.fc1 = nn.Linear(in_size, hidden)
         self.fc2 = nn.Linear(hidden, flat_out)
+        self.fc1.to(device)
+        self.fc2.to(device)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.to(device)
         x = x.view(x.size(0), -1).float()
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
