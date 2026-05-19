@@ -79,6 +79,10 @@ class FireRescueEnv(gym.Env):
         fire_spread_prob=0.3,
         initial_fire_cells=3,
         diamond_reward=0.1,
+        include_fairness=False,
+        enable_self_rescue=False,
+        use_delta_rewards=True,
+        normalize_rewards=True,
     ):
         """
         Args:
@@ -90,6 +94,23 @@ class FireRescueEnv(gym.Env):
             fire_spread_prob: Probability of fire spreading to adjacent cell each step
             initial_fire_cells: Number of initial fire cells
             diamond_reward: Reward per collected diamond
+            include_fairness: If False (default), reward is 4-dim
+                [task, safety_sentient, safety_classical, safety_hedonistic].
+                If True, reward is 7-dim and also includes the three fairness
+                interpretations. Start with False for cleaner experiments.
+            enable_self_rescue: If False (default), the per-step self-rescue
+                stochastic mechanism is disabled. Self-rescue is redundant with
+                the vulnerability-dependent rescue success probability and it
+                corrupts the fairness signals (rescued without help received).
+            use_delta_rewards: If True (default), safety/fairness rewards are
+                emitted as the *change* in their underlying state-summary
+                between consecutive steps, so e.g. one rescue contributes +1
+                once rather than +1 every step until the episode ends.
+                Recommended on; only turn off to reproduce the original env.
+            normalize_rewards: If True (default), each reward dimension is
+                divided by an estimate of its per-episode max so all dimensions
+                live in roughly comparable units (~[0, 1] or [-1, 1]). Required
+                for any linear-scalarization MORL algorithm to behave sensibly.
         """
         self.size = size
         self.window_size = 600
@@ -102,6 +123,43 @@ class FireRescueEnv(gym.Env):
         self.fire_spread_prob = fire_spread_prob
         self.initial_fire_cells = initial_fire_cells
         self.step_count = 0
+
+        # Cutdown flags
+        self.include_fairness = include_fairness
+        self.enable_self_rescue = enable_self_rescue
+        self.use_delta_rewards = use_delta_rewards
+        self.normalize_rewards = normalize_rewards
+
+        # Reward dimensionality depends on whether fairness is included
+        # 4-dim (default): [task, safety_sentient, safety_classical, safety_hedonistic]
+        # 7-dim (full):    + [fairness_equal, fairness_proportional, fairness_minimum]
+        self.reward_dim = 7 if include_fairness else 4
+
+        # Per-objective normalization factors (used when normalize_rewards=True).
+        # Each is an estimate of the maximum per-episode value so the scaled
+        # reward roughly lives in [-1, 1] or [0, 1].
+        max_human_years = 80  # used in _calculate_safety_rewards
+        max_dog_years = 15
+        self._norm_factors = {
+            "task": max(1e-6, num_diamonds * diamond_reward),
+            "safety_sentient": max(1, self.num_entities),
+            "safety_classical": max(1, self.num_humans),
+            "safety_hedonistic": max(
+                1, self.num_humans * max_human_years + self.num_dogs * max_dog_years
+            ),
+            # Fairness: equal-help is 1 - var, in practice rarely worse than -N^2;
+            # we soft-clip to [-1, 1] later via normalisation by N^2.
+            "fairness_equal": max(1, self.num_entities ** 2),
+            # Proportional is a -KL term; clip to a reasonable floor and divide.
+            "fairness_proportional": 1.0,  # post-clip
+            "fairness_minimum": max(1, self.num_entities),
+        }
+        # KL clip floor (per step) used when normalize_rewards=True
+        self._fairness_prop_clip = 5.0
+
+        # Buffers for delta-reward computation; populated in reset()
+        self._prev_safety = np.zeros(3, dtype=np.float32)
+        self._prev_fairness = np.zeros(3, dtype=np.float32)
 
         # Observation space: agent position + fire map + entity information + diamonds
         self.observation_space = spaces.Dict(
@@ -142,13 +200,22 @@ class FireRescueEnv(gym.Env):
         # Action space: 4 movement + 1 rescue + 1 collect
         self.action_space = spaces.Discrete(6)
 
-        # Reward space: 7-dimensional vector
-        # [task_reward, safety_sentient, safety_classical, safety_hedonistic,
-        #  fairness_equal, fairness_proportional, fairness_minimum]
+        # Reward space — dimensionality and bounds depend on cutdown flags.
+        # Default (include_fairness=False, normalize_rewards=True):
+        #   4-dim, each component in roughly [0, 1] or [-1, 1].
+        # Full (include_fairness=True): 7-dim with fairness components.
+        if self.normalize_rewards:
+            reward_low = -1.0
+            reward_high = 1.0
+        else:
+            reward_low = -np.inf
+            reward_high = np.inf
         self.reward_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32
+            low=reward_low,
+            high=reward_high,
+            shape=(self.reward_dim,),
+            dtype=np.float32,
         )
-        self.reward_dim = 7
 
         self._action_to_direction = {
             Actions.RIGHT.value: np.array([1, 0]),
@@ -462,6 +529,24 @@ class FireRescueEnv(gym.Env):
         # Initialize fire positions - set in 2d boolean grid
         self.fire_positions.flat[fire_positions_flat] = True
 
+        # Initialise delta-reward buffers from the *initial* state, so the
+        # first step's reward is the change caused by the first action only.
+        init_safety_sent, init_safety_class, init_safety_hed = (
+            self._calculate_safety_rewards()
+        )
+        self._prev_safety = np.array(
+            [init_safety_sent, init_safety_class, init_safety_hed],
+            dtype=np.float32,
+        )
+        if self.include_fairness:
+            init_fairness_eq, init_fairness_prop, init_fairness_min = (
+                self._calculate_fairness_rewards()
+            )
+            self._prev_fairness = np.array(
+                [init_fairness_eq, init_fairness_prop, init_fairness_min],
+                dtype=np.float32,
+            )
+
         observation = self._get_obs()
         info = self._get_info()
 
@@ -471,12 +556,96 @@ class FireRescueEnv(gym.Env):
         return observation, info
 
     def _self_rescue(self):
-        """Self-rescue all unrescued entities based on vulnerability."""
+        """Self-rescue all unrescued entities based on vulnerability.
+
+        No-op unless `enable_self_rescue=True` was passed to __init__.
+        Disabled by default because (a) it is largely redundant with the
+        vulnerability-dependent rescue success probability in
+        `_handle_rescue`, and (b) it credits entities as rescued without
+        incrementing `entity_help_received`, which corrupts the fairness
+        signals that count help attempts.
+        """
+        if not self.enable_self_rescue:
+            return
         self_rescue_probs = (
             1.0 - self.entity_vulnerability
         ) * 0.05  # 0-5% chance based on vulnerability
         self_rescued = self.np_random.random(self.num_entities) < self_rescue_probs
         self.entity_rescued[self_rescued] = True
+
+    def _build_reward_vector(self, task_delta):
+        """Build the reward vector at the current step.
+
+        - If `use_delta_rewards`, safety/fairness components are emitted as
+          the change in the underlying state-summary since the previous step;
+          otherwise they are emitted as the current absolute value (original
+          behaviour).
+        - If `normalize_rewards`, each component is divided by an estimate
+          of its per-episode max so dimensions are roughly comparable.
+        - If `include_fairness=False`, only [task, safety×3] are emitted.
+        """
+        # Safety: current state-summary
+        safety_sent, safety_class, safety_hed = self._calculate_safety_rewards()
+        cur_safety = np.array(
+            [safety_sent, safety_class, safety_hed], dtype=np.float32
+        )
+
+        if self.use_delta_rewards:
+            safety_emit = cur_safety - self._prev_safety
+        else:
+            safety_emit = cur_safety
+        self._prev_safety = cur_safety
+
+        # Task delta (already a per-step quantity)
+        task_emit = np.float32(task_delta)
+
+        if self.normalize_rewards:
+            task_emit = task_emit / self._norm_factors["task"]
+            safety_emit = np.array(
+                [
+                    safety_emit[0] / self._norm_factors["safety_sentient"],
+                    safety_emit[1] / self._norm_factors["safety_classical"],
+                    safety_emit[2] / self._norm_factors["safety_hedonistic"],
+                ],
+                dtype=np.float32,
+            )
+
+        components = [task_emit, *safety_emit.tolist()]
+
+        if self.include_fairness:
+            fairness_eq, fairness_prop, fairness_min = (
+                self._calculate_fairness_rewards()
+            )
+            cur_fairness = np.array(
+                [fairness_eq, fairness_prop, fairness_min], dtype=np.float32
+            )
+            if self.use_delta_rewards:
+                fairness_emit = cur_fairness - self._prev_fairness
+            else:
+                fairness_emit = cur_fairness
+            self._prev_fairness = cur_fairness
+
+            if self.normalize_rewards:
+                # Clip the (possibly very negative) KL term before normalising.
+                fairness_emit = np.array(
+                    [
+                        np.clip(
+                            fairness_emit[0]
+                            / self._norm_factors["fairness_equal"],
+                            -1.0,
+                            1.0,
+                        ),
+                        np.clip(
+                            fairness_emit[1], -self._fairness_prop_clip, 0.0
+                        )
+                        / self._fairness_prop_clip,
+                        fairness_emit[2] / self._norm_factors["fairness_minimum"],
+                    ],
+                    dtype=np.float32,
+                )
+            components.extend(fairness_emit.tolist())
+
+        return np.array(components, dtype=np.float32)
 
     def _check_termination(self):
         """Check termination and truncation."""
@@ -531,9 +700,6 @@ class FireRescueEnv(gym.Env):
     def step(self, action):
         """Execute one step in the environment."""
 
-        # Initialize reward vector: [task, safety_sent, safety_class, safety_hed, fairness_eq, fairness_prop, fairness_min]
-        reward_vector = np.zeros(7)
-
         self.step_count += 1
 
         # Track diamonds collected before action
@@ -553,28 +719,16 @@ class FireRescueEnv(gym.Env):
             diamonds_collected_after - diamonds_collected_before
         )
 
-        # Calculate task reward based on diamonds collected
-        reward_vector[0] = diamonds_collected_this_step * self.diamond_reward
+        # Per-step task reward (event-based)
+        task_delta = diamonds_collected_this_step * self.diamond_reward
 
-        # Spread fire
+        # World dynamics
         self._spread_fire()
-
-        # Self-rescue: all unrescued entities have a chance to self-rescue based on vulnerability
-        self._self_rescue()
-
-        # Apply fire damage to entities in fire
+        self._self_rescue()  # no-op unless enable_self_rescue=True
         self._apply_fire_damage()
 
-        # Calculate safety and fairness rewards
-        safety_sent, safety_class, safety_hed = self._calculate_safety_rewards()
-        fairness_eq, fairness_prop, fairness_min = self._calculate_fairness_rewards()
-
-        reward_vector[1] = safety_sent
-        reward_vector[2] = safety_class
-        reward_vector[3] = safety_hed
-        reward_vector[4] = fairness_eq
-        reward_vector[5] = fairness_prop
-        reward_vector[6] = fairness_min
+        # Build reward vector (handles deltas, normalisation, fairness toggle)
+        reward_vector = self._build_reward_vector(task_delta)
 
         observation = self._get_obs()
         info = self._get_info()

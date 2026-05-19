@@ -1,0 +1,40 @@
+{
+    "env": {
+        "id": "goal-safe-v0",
+        "max_episode_steps": 50,
+        "grid_size": 5,
+        "num_humans": 5,
+        "step_penalty": 0.3,
+        "terminal_reward": 1,
+        "obs_as_grid": false
+    },
+    "train": {
+        "total_timesteps": 50000,
+        "eval_freq": 5000,
+        "num_eval_weights_for_front": 50,
+        "num_eval_episodes_for_front": 5,
+        "num_eval_weights_for_eval": 25
+    },
+    "eval": {
+        "num_eval_episodes": 5,
+        "num_eval_weights": 25,
+        "out_dir": "results/reach_goal/pareto_front_small"
+    },
+    "agent": {
+        "seed": 42,
+        "learning_rate": 0.001,
+        "initial_epsilon": 1.0,
+        "final_epsilon": 0.05,
+        "epsilon_decay_steps": 15000,
+        "net_arch": [
+            128,
+            128
+        ],
+        "batch_size": 64,
+        "learning_starts": 2000,
+        "gradient_updates": 1,
+        "target_net_update_freq": 100,
+        "log": true,
+        "load_agent_path": "results/reach_goal/pareto_front_small/small__50000__wl71o1xu/model.tar"
+    }
+}
