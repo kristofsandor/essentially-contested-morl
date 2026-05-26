@@ -1,19 +1,22 @@
 {
     "env": {
         "id": "goal-safe-v0",
-        "max_episode_steps": 50,
+        "max_episode_steps": 25,
         "grid_size": 5,
         "num_humans": 5,
-        "step_penalty": 0.1,
-        "terminal_reward": 1,
+        "help_reward": 1,
+        "step_penalty": 0.25,
+        "terminal_reward": 2,
+        "proximity_reward": 0.05,
         "obs_as_grid": false
     },
     "train": {
-        "total_timesteps": 350000,
-        "eval_freq": 10000,
+        "total_timesteps": 50000,
+        "eval_freq": 5000,
         "num_eval_weights_for_front": 25,
         "num_eval_episodes_for_front": 5,
-        "num_eval_weights_for_eval": 25
+        "num_eval_weights_for_eval": 25,
+        "verbose": true
     },
     "eval": {
         "num_eval_episodes": 5,
@@ -21,20 +24,23 @@
         "out_dir": "results/reach_goal/pareto_front_small"
     },
     "agent": {
+        "algorithm": "envelope",
         "seed": 42,
-        "learning_rate": 0.001,
+        "learning_rate": 1e-4,
         "initial_epsilon": 1.0,
-        "final_epsilon": 0.1,
-        "epsilon_decay_steps": 100000,
+        "final_epsilon": 0.01,
+        "epsilon_decay_steps": 5000,
         "net_arch": [
-            256,
-            256,
-            256
+            64,
+            64
         ],
         "batch_size": 64,
-        "learning_starts": 2000,
+        "learning_starts": 500,
         "gradient_updates": 1,
         "target_net_update_freq": 500,
+        "envelope": true,
+        "per": true,
+        "num_sample_w": 5,
         "log": true
     }
 }

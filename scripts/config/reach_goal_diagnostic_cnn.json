@@ -4,17 +4,22 @@
         "max_episode_steps": 50,
         "grid_size": 5,
         "num_humans": 5,
-        "help_reward": 5,
-        "step_penalty": 0.3,
+        "help_reward": 1,
+        "step_penalty": 0.1,
         "terminal_reward": 1,
-        "obs_as_grid": false
+        "obs_as_grid": true
     },
     "train": {
         "total_timesteps": 50000,
-        "eval_freq": 500,
+        "eval_freq": 5000,
         "num_eval_weights_for_front": 25,
         "num_eval_episodes_for_front": 5,
-        "num_eval_weights_for_eval": 25
+        "num_eval_weights_for_eval": 25,
+        "weight": [
+            0.0,
+            1.0
+        ],
+        "verbose": true
     },
     "eval": {
         "num_eval_episodes": 5,
@@ -27,16 +32,25 @@
         "learning_rate": 1e-4,
         "initial_epsilon": 1.0,
         "final_epsilon": 0.05,
-        "epsilon_decay_steps": 25000,
+        "epsilon_decay_steps": 5000,
         "net_arch": [
             64,
             64
         ],
         "batch_size": 64,
-        "learning_starts": 0,
+        "learning_starts": 500,
         "gradient_updates": 1,
-        "target_net_update_freq": 100,
+        "target_net_update_freq": 500,
+        "envelope": false,
+        "per": false,
+        "num_sample_w": 1,
         "log": true,
+        "cnn_config": {
+            "out_features": 64,
+            "channels": [3, 8, 16],
+            "kernels": [3, 3],
+            "strides": [1,1],
+            "paddings": [1, 0]
+        }
     }
-}
 }

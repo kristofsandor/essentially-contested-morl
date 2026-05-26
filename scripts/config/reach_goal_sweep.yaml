@@ -1,0 +1,82 @@
+program: scripts/train_reach_goal.py
+method: bayes
+metric:
+  name: eval/hypervolume
+  goal: maximize
+command:
+  - ${env}
+  - ${interpreter}
+  - -m
+  - scripts.train_reach_goal
+  - --sweep
+
+parameters:
+  env:
+    parameters:
+      id:                 { value: "goal-safe-v0" }
+      max_episode_steps:  { value: 50 }
+      grid_size:          { value: 5 }
+      num_humans:         { value: 5 }
+      help_reward:        { value: 1 }
+      step_penalty:       { value: 0.1 }
+      terminal_reward:    { value: 1 }
+      obs_as_grid:        
+        values: [true, false]
+
+  train:
+    parameters:
+      total_timesteps:               { value: 150000 }   # shorter for sweep
+      eval_freq:                     { value: 10000 }
+      num_eval_weights_for_front:    { value: 50 }
+      num_eval_episodes_for_front:   { value: 5 }
+      num_eval_weights_for_eval:     { value: 25 }
+
+  eval:
+    parameters:
+      num_eval_episodes: { value: 5 }
+      num_eval_weights:  { value: 25 }
+      out_dir:           { value: "results/reach_goal/sweep" }
+
+  agent:
+    parameters:
+      algorithm:              { value: "envelope" }
+      seed:                   { value: 42 }
+      initial_epsilon:        { value: 1.0 }
+      final_epsilon:          { value: 0.1 }
+      epsilon_decay_steps:
+        values: [40000, 80000, 120000]
+      learning_starts:        { value: 500 }
+      gradient_updates:       { value: 1 }
+      log:                    { value: true }
+
+      # --- swept ---
+      learning_rate:
+        distribution: log_uniform_values
+        min: 0.0001
+        max: 0.003
+      batch_size:
+        values: [64, 128, 256]
+      num_sample_w:
+        values: [4, 8, 16]
+      target_net_update_freq:
+        values: [200, 500, 1000]
+      net_arch:
+        values:
+          - [128, 128]
+          - [256, 256]
+          - [256, 256, 256]
+      per:
+        values: [true, false]
+
+      cnn_config:
+        parameters:
+          out_features: { value: 64 }
+          channels:     { value: [3, 16, 32] }
+          kernels:      { value: [3, 3] }
+          strides:      { value: [1, 1] }
+          paddings:     { value: [1, 0] }
+
+early_terminate:
+  type: hyperband
+  min_iter: 30000
+  eta: 3

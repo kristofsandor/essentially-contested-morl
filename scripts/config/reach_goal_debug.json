@@ -18,7 +18,7 @@
     "eval": {
         "num_eval_episodes": 5,
         "num_eval_weights": 25,
-        "out_dir": "results/reach_goal/pareto_front_small"
+        "out_dir": "results/reach_goal/debug"
     },
     "agent": {
         "seed": 42,
@@ -31,6 +31,13 @@
         "learning_starts": 50,
         "gradient_updates": 1,
         "target_net_update_freq": 50,
-        "log": true
+        "log": true,
+        "cnn_config": {
+            "out_features": 64,
+            "channels": [3, 16, 32],
+            "kernels": [3, 3],
+            "strides": [1,1],
+            "paddings": [1, 0]
+        }
     }
 }

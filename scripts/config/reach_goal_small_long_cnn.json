@@ -4,14 +4,15 @@
         "max_episode_steps": 50,
         "grid_size": 5,
         "num_humans": 5,
+        "help_reward": 1,
         "step_penalty": 0.1,
         "terminal_reward": 1,
-        "obs_as_grid": false
+        "obs_as_grid": true
     },
     "train": {
         "total_timesteps": 350000,
         "eval_freq": 10000,
-        "num_eval_weights_for_front": 25,
+        "num_eval_weights_for_front": 50,
         "num_eval_episodes_for_front": 5,
         "num_eval_weights_for_eval": 25
     },
@@ -21,20 +22,27 @@
         "out_dir": "results/reach_goal/pareto_front_small"
     },
     "agent": {
+        "algorithm": "envelope",
         "seed": 42,
-        "learning_rate": 0.001,
+        "learning_rate": 0.0003,
         "initial_epsilon": 1.0,
         "final_epsilon": 0.1,
         "epsilon_decay_steps": 100000,
         "net_arch": [
             256,
-            256,
             256
         ],
         "batch_size": 64,
-        "learning_starts": 2000,
+        "learning_starts": 500,
         "gradient_updates": 1,
         "target_net_update_freq": 500,
-        "log": true
+        "log": true,
+        "cnn_config": {
+            "out_features": 64,
+            "channels": [3, 16, 32],
+            "kernels": [3, 3],
+            "strides": [1,1],
+            "paddings": [1, 0]
+        }
     }
 }
