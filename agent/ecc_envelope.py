@@ -27,6 +27,7 @@ from morl_baselines.common.networks import (
     mlp,
     polyak_update,
 )
+from morl_baselines.common.pareto import get_non_dominated
 from morl_baselines.common.performance_indicators import hypervolume
 from morl_baselines.common.prioritized_buffer import PrioritizedReplayBuffer
 from morl_baselines.common.utils import linearly_decaying_value
@@ -137,7 +138,6 @@ class Envelope(MOPolicy, MOAgent):
         gamma: float = 0.99,
         max_grad_norm: Optional[float] = 1.0,
         envelope: bool = True,
-        use_hv: bool = False,
         num_sample_w: int = 4,
         per: bool = True,
         per_alpha: float = 0.6,
@@ -152,7 +152,8 @@ class Envelope(MOPolicy, MOAgent):
         device: Union[th.device, str] = "auto",
         group: Optional[str] = None,
         cnn_config: Optional[dict] = None,
-        ref_point: Optional[np.ndarray] = None,
+        concepts: Optional[List[List[int]]] = None,
+        ref_points: Optional[List[np.ndarray]] = None,
         num_hv_sample_w: int = 4,
     ):
         """Envelope Q-learning algorithm.
@@ -208,7 +209,8 @@ class Envelope(MOPolicy, MOAgent):
         self.initial_homotopy_lambda = initial_homotopy_lambda
         self.final_homotopy_lambda = final_homotopy_lambda
         self.homotopy_decay_steps = homotopy_decay_steps
-        self.ref_point = ref_point
+        self.concepts = concepts
+        self.ref_points = ref_points
         self.num_hv_sample_w = num_hv_sample_w
 
         if len(self.observation_shape) == 1:
@@ -225,7 +227,6 @@ class Envelope(MOPolicy, MOAgent):
         self.q_optim = optim.Adam(self.q_net.parameters(), lr=self.learning_rate)
 
         self.envelope = envelope
-        self.use_hv = use_hv
         self.num_sample_w = num_sample_w
         self.homotopy_lambda = self.initial_homotopy_lambda
         self._episode_rewards: deque = deque(maxlen=100)
@@ -355,8 +356,6 @@ class Envelope(MOPolicy, MOAgent):
             )
 
             with th.no_grad():
-                if self.use_hv:
-                    target = self.hv_target(b_next_obs, w, sampled_w)
                 if self.envelope:
                     target = self.envelope_target(b_next_obs, w, sampled_w)
                 else:
@@ -482,7 +481,7 @@ class Envelope(MOPolicy, MOAgent):
         """
         if self.np_random.random() < self.epsilon:
             return self.env.action_space.sample()
-        elif self.use_hv is not None:
+        elif self.concepts is not None:
             return self.hv_max_action(obs)
         else:
             return self.max_action(obs, w)
@@ -504,54 +503,36 @@ class Envelope(MOPolicy, MOAgent):
 
     @th.no_grad()
     def hv_max_action(self, obs: th.Tensor) -> int:
-        """Select the action whose Q-set has the highest hypervolume.
+        """Select the action with the highest combined hypervolume across all concepts.
 
-        Samples num_hv_sample_w weight vectors, evaluates Q-values under each,
-        and picks the action with the largest hypervolume of its Q-value set.
+        For each concept, samples K weights in that concept's objective subspace,
+        evaluates Q-values, extracts the concept's dimensions to form a Q-set,
+        prunes to the non-dominated subset, and computes its hypervolume.
+        Action scores are the product of per-concept HVs (like ecc_pql).
 
         Args:
             obs: current observation (unbatched)
-
-        Returns: the action with the highest hypervolume score.
         """
-        assert self.ref_point is not None, "ref_point must be set to use hv_max_action"
-        sampled_w = th.tensor(
-            random_weights(self.reward_dim, self.num_hv_sample_w, dist="dirichlet", rng=self.np_random)
-        ).float().to(self.device)  # [K, reward_dim]
+        assert self.concepts is not None and self.ref_points is not None
+        K = self.num_hv_sample_w
+        combined = np.ones(self.action_dim)
 
-        obs_batch = th.stack([obs] * self.num_hv_sample_w)
-        q_values = self.q_net(obs_batch, sampled_w)  # [K, action_dim, reward_dim]
-        q_np = q_values.cpu().numpy()
+        for indices, ref_pt in zip(self.concepts, self.ref_points):
+            # Build K weights with non-zero values only in this concept's dimensions
+            sub_w = random_weights(len(indices), K, dist="dirichlet", rng=self.np_random)
+            full_w = np.zeros((K, self.reward_dim))
+            full_w[:, indices] = sub_w
+            w_tensor = th.tensor(full_w, dtype=th.float32, device=self.device)
 
-        hv_scores = np.array([
-            hypervolume(self.ref_point, list(q_np[:, a, :]))
-            for a in range(self.action_dim)
-        ])
-        return int(np.argmax(hv_scores))
+            obs_batch = th.stack([obs] * K)
+            q_values = self.q_net(obs_batch, w_tensor)  # [K, action_dim, reward_dim]
+            q_concept = q_values[:, :, indices].cpu().numpy()  # [K, action_dim, len(indices)]
 
+            for a in range(self.action_dim):
+                q_set = get_non_dominated(set(map(tuple, q_concept[:, a, :].tolist())))
+                combined[a] *= hypervolume(ref_pt, list(q_set))
 
-    @th.no_grad()
-    def hv_target(self, obs: th.Tensor, w: th.Tensor, sampled_w: th.Tensor) -> th.Tensor:
-        # obs: [batch * num_sample_w, obs_dim], already expanded in update()
-        batch_total = obs.size(0)
-
-        # Evaluate Q-values on online net to find HV-best action per state
-        q_values = self.q_net(obs, w)  # [batch_total, action_dim, reward_dim]
-        q_np = q_values.cpu().numpy()
-
-        best_actions = np.array([
-            np.argmax([hypervolume(self.ref_point, list(q_np[b, :, :].T[np.newaxis]))
-                    for a in range(self.action_dim)])
-            for b in range(batch_total)
-        ])
-        # Evaluate on target net for stability
-        q_target = self.target_q_net(obs, w)  # [batch_total, action_dim, reward_dim]
-        best_acts_t = th.tensor(best_actions, device=self.device).long()
-        result = q_target.gather(
-            1,
-            best_acts_t.reshape(-1, 1, 1).expand(batch_total, 1, self.reward_dim)
-        ).squeeze(1)
-        return result  # [batch_total, reward_dim]
+        return int(np.argmax(combined))
 
     @th.no_grad()
     def envelope_target(self, obs: th.Tensor, w: th.Tensor, sampled_w: th.Tensor) -> th.Tensor:

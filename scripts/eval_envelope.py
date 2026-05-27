@@ -18,10 +18,9 @@ COMPONENT_NAMES = ["task", "help"]
 def eval_agent(
     eval_env,
     agent,
-    run_id,
+    out_dir,
     num_eval_weights,
     num_eval_episodes,
-    out_dir,
     max_episode_steps,
     num_humans,
     help_reward,
@@ -31,25 +30,13 @@ def eval_agent(
     **__unused_kwargs,
 ) -> None:
     print("[train] evaluating at a sweep of weights ...")
-    out_dir = Path(out_dir)
-    out_dir = out_dir / run_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    try:
-        agent.save(save_dir=str(out_dir), filename="model")
-    except MemoryError as e:
-        print(f"[train] error saving agent: {e}, retrying without replay buffer")
-    try:
-        agent.save(save_dir=str(out_dir), filename="model", save_replay_buffer=False)
-    except Exception as e:
-        print(f"[train] error saving agent: {e}")
 
     reward_dim = eval_env.unwrapped.reward_space.shape[0]
     weights = equally_spaced_weights(reward_dim, n=num_eval_weights)
     eval_returns = []
     for w in weights:
         ep_returns = []
-        for ep in range(100):
+        for ep in range(num_eval_episodes):
             obs, _ = eval_env.reset()
             done = False
             ret = np.zeros(reward_dim, dtype=np.float32)
@@ -188,7 +175,6 @@ def plot_eval(
 
 def eval_run_id(run_id, config=None, render=False) -> None:
     print(f"[eval] loading config from wandb for run {run_id} ...")
-    # min_x, num_eval_weights, num_eval_episodes, out_dir, agent_config, agent_path
     wandb.init(id=run_id, resume="allow", project="MORL-Baselines")
 
 
@@ -202,7 +188,6 @@ def eval_run_id(run_id, config=None, render=False) -> None:
     if render:
         env_config["render_mode"] = "human"
     eval_env = gym.make(**env_config)
-    min_x = -env_config.get("max_episode_steps") * env_config.get("step_penalty") - 10.0
 
     agent_path = find_model_path(run_id)
     agent = make_agent(env=eval_env, agent_config=agent_config)

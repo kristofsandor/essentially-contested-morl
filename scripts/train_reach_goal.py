@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 
 import matplotlib
 
@@ -40,10 +41,7 @@ def run_train(config) -> None:
 
     run_id = agent_config.pop("continue_run_id", "")
 
-    print(
-        f"[train] total_timesteps={train_config.get('total_timesteps')}, "
-        f"num_eval_weights={train_config.get('num_eval_weights')}, num_eval_episodes={train_config.get('num_eval_episodes')}"
-    )
+    print( f"[train] total_timesteps={train_config.get('total_timesteps')}")
     env_ = make_env(env_config)
     eval_env = make_env(env_config)
 
@@ -56,6 +54,7 @@ def run_train(config) -> None:
         ],
         dtype=np.float32,
     )
+    agent_config["ref_point"] = ref_point
 
     agent = make_agent(env=env_, agent_config=agent_config)
 
@@ -74,14 +73,25 @@ def run_train(config) -> None:
     )
 
     print("[train] training Envelope ...")
-    agent.train(eval_env=eval_env, ref_point=ref_point, **train_config)
+    agent.train(eval_env=eval_env, **train_config)
 
     use_small = env_config.get("grid_size") <= 5
-    run_id = wandb.run.id
-    run_id = f"{"small" if use_small else "medium"}__{train_config.get('total_timesteps')}__{run_id}"
+    run_id = f"{"small" if use_small else "medium"}__{train_config.get('total_timesteps')}__{wandb.run.id}"
 
-    min_x = -env_config.get("max_episode_steps") * env_config.get("step_penalty") - 10.0
-    eval_agent(eval_env, agent, run_id, min_x, **eval_config, **env_config)
+    out_dir = eval_config.pop("out_dir", "results/reach_goal/pareto_front")
+    out_dir = Path(out_dir) / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        agent.save(save_dir=str(out_dir), filename="model")
+    except MemoryError as e:
+        print(f"[train] error saving agent: {e}, retrying without replay buffer")
+    try:
+        agent.save(save_dir=str(out_dir), filename="model", save_replay_buffer=False)
+    except Exception as e:
+        print(f"[train] error saving agent: {e}")
+
+    eval_agent(eval_env, agent, out_dir, **eval_config, **env_config)
 
 
 # ---------------------------------------------------------------------------

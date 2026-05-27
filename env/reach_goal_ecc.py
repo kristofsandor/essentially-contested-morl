@@ -1,11 +1,15 @@
 from enum import IntEnum
-
 import gymnasium as gym
+from numpy import float32
 import numpy as np
 import pygame
-from numpy import float32
 
 RENDER_FPS = 5
+
+# Normalizes utilitarian per-human reward so its expected value matches the
+# deontological per-human reward. Ages ~ U(0.001, 1.0) ⇒ E[age] ≈ 0.5,
+# so multiplying by 2 puts both interpretations on the same average scale.
+UTIL_SCALE = 2.0
 
 
 class Action(IntEnum):
@@ -43,9 +47,25 @@ class ReachGoalEnv(gym.Env):
                 low=0, high=1, shape=(4 + self.num_humans * 4,), dtype=float32
             )
 
+        # Reward is now a 2x2 matrix:
+        #   row 0 (deontological): [task,  deont_help]
+        #   row 1 (utilitarian):   [0,     util_help]
+        # Wrappers downstream project this to whatever (2,) shape Envelope wants.
         self.reward_space = gym.spaces.Box(
-            low=np.array([-step_penalty, 0.0], dtype=float32),
-            high=np.array([terminal_reward - step_penalty, 1], dtype=float32),
+            low=np.array(
+                [
+                    [-step_penalty, -proximity_reward],
+                    [0.0, -proximity_reward * UTIL_SCALE],
+                ],
+                dtype=np.float32,
+            ),
+            high=np.array(
+                [
+                    [terminal_reward, help_reward + proximity_reward],
+                    [0.0, help_reward * UTIL_SCALE + proximity_reward * UTIL_SCALE],
+                ],
+                dtype=np.float32,
+            ),
         )
 
         self.help_reward = help_reward
@@ -74,15 +94,6 @@ class ReachGoalEnv(gym.Env):
         return agent_pos, goal_pos, prev_pos, human_ages, human_positions, helped
 
     def reset(self, seed=None, options=None):
-        # top left
-        # self.agent_pos = [0, 0]
-        # self.human_ages = np.random.uniform(0.001, 1.0, self.num_humans).round(2)
-        # # random positions in a normal distribution around the top middle of the grid
-        # self.human_positions = self.distribute_humans(self.grid_size, self.num_humans)
-        # self.human_positions = np.array(
-        #     sorted(self.human_positions, key=lambda pos: (pos[0], pos[1]))
-        # )  # sort by row, then column for consistency
-        # self.helped = np.zeros(len(self.human_positions), dtype=bool)
         (
             self.agent_pos,
             self.goal_pos,
@@ -156,7 +167,6 @@ class ReachGoalEnv(gym.Env):
         # Count of valid y's per column, then build (y, x) for every point
         counts = np.maximum(y_max - y_min + 1, 0)
         cols = np.repeat(xs, counts)
-        # classic "ranges from counts" trick: 0..c0-1, 0..c1-1, ... then shift by y_min
         rows = (
             np.arange(counts.sum())
             - np.repeat(np.cumsum(counts) - counts, counts)
@@ -172,12 +182,14 @@ class ReachGoalEnv(gym.Env):
         n = min(num_humans, len(all_points))
         idx = np.random.choice(len(all_points), size=n, replace=False)
         return all_points[idx]
-    
+
     def distribute_humans_2(self, grid_size, num_humans):
         """Place humans across rows 1..grid_size-1 for graduated detour costs.
 
-        Round-robin: 1 human → row 1; G-1 humans → one per row; 
+        Round-robin: 1 human → row 1; G-1 humans → one per row;
         2*(G-1) humans → two per row; etc. Columns randomized per row.
+        Deep-first variant: doubles up on deep rows before shallow ones,
+        keeping early humans cheap and later ones expensive.
         """
         n_rows = grid_size - 1  # exclude agent/goal row 0
         if num_humans > n_rows * grid_size:
@@ -186,9 +198,6 @@ class ReachGoalEnv(gym.Env):
                 f"{n_rows * grid_size} for grid_size={grid_size}"
             )
 
-        # Round-robin row assignment: shallow first, then wrap
-        # row_assignments = [(i % n_rows) + 1 for i in range(num_humans)]
-        # Round-robin row assignment: deep first, then wrap
         row_assignments = [
             (n_rows - (i % n_rows)) if (i // n_rows) % 2 else (i % n_rows + 1)
             for i in range(num_humans)
@@ -206,7 +215,9 @@ class ReachGoalEnv(gym.Env):
         return np.array(sorted(positions, key=lambda p: (p[0], p[1])))
 
     def step(self, action):
-        self.prev_pos = self.agent_pos
+        # Save the pre-movement position so shaping is computed against
+        # the actual previous cell, not a stale [0, 0] from reset().
+        self.prev_pos = list(self.agent_pos)
         x_pos, y_pos = self.agent_pos
 
         # perform the movement
@@ -222,10 +233,14 @@ class ReachGoalEnv(gym.Env):
             raise Exception(f"bad action {action}")
 
         terminated = False
-        reward = np.zeros(2, dtype=np.float32)
-        reward[0] -= self.step_penalty
+        # Reward is a 2x2 matrix. Rows = interpretations, columns = objectives.
+        #            task   safety
+        # deont [    v0  , v1_d   ]
+        # util  [    0   , v1_u   ]
+        reward = np.zeros((2, 2), dtype=np.float32)
+        reward[:, 0] -= self.step_penalty  # task penalty in all rows
 
-        # cannot move out of bounds
+        # out of bounds, cannot move (agent stays in place but still pays the step cost)
         if y_pos < 0 or y_pos >= self.grid_size or x_pos < 0 or x_pos >= self.grid_size:
             return (
                 self.get_obs(),
@@ -235,33 +250,55 @@ class ReachGoalEnv(gym.Env):
                 {},
             )
 
-        # in bounds
         self.agent_pos = [x_pos, y_pos]
 
-        # into a human cell
-        human_matches = np.where((self.human_positions == self.agent_pos).all(axis=1))[0]
+        # into a human cell -- credit both interpretations on first contact
+        human_matches = np.where(
+            (self.human_positions == self.agent_pos).all(axis=1)
+        )[0]
         if len(human_matches) > 0:
             human_idx = human_matches[0]
             if not self.helped[human_idx]:
                 self.helped[human_idx] = True
-                reward[1] += self.help_reward
+                # deontological: uniform reward per human
+                reward[0, 1] += self.help_reward
+                # utilitarian: reward proportional to age, normalized so E[per-human] matches deont
+                reward[1, 1] += (
+                    self.help_reward * self.human_ages[human_idx] * UTIL_SCALE
+                )
 
         # into goal cell
         if self.agent_pos == self.goal_pos:
-            reward[0] += self.terminal_reward
+            reward[:, 0] += self.terminal_reward
             terminated = True
 
         if self.render_mode == "human":
             self.render()
-        # Just before returning from step()
+
+        # Reward shaping: dense signal toward unhelped humans.
+        # Computed for both interpretations using their respective notions of "value".
         unhelped_mask = ~self.helped
-        if unhelped_mask.any() and (
-            self.prev_pos != self.agent_pos
-        ):  # only when actually moved
+        moved = self.prev_pos != self.agent_pos
+        if unhelped_mask.any() and moved:
             unhelped_positions = self.human_positions[unhelped_mask]
-            prev_dist = np.abs(unhelped_positions - self.prev_pos).sum(axis=1).min()
-            curr_dist = np.abs(unhelped_positions - self.agent_pos).sum(axis=1).min()
-            reward[1] += self.proximity_reward * (prev_dist - curr_dist)  # +0.05 toward, -0.05 away
+            unhelped_ages = self.human_ages[unhelped_mask]
+            prev_dists = np.abs(unhelped_positions - self.prev_pos).sum(axis=1)
+            curr_dists = np.abs(unhelped_positions - self.agent_pos).sum(axis=1)
+
+            # Deontological shaping: move toward the NEAREST unhelped human (age-agnostic).
+            reward[0, 1] += self.proximity_reward * (
+                prev_dists.min() - curr_dists.min()
+            )
+
+            # Utilitarian shaping: move toward the human with the best age/distance ratio
+            # (greedy value-per-step heuristic). Use max(dists, 1) to avoid div-by-zero.
+            prev_score = (
+                unhelped_ages * UTIL_SCALE / np.maximum(prev_dists, 1)
+            ).max()
+            curr_score = (
+                unhelped_ages * UTIL_SCALE / np.maximum(curr_dists, 1)
+            ).max()
+            reward[1, 1] += self.proximity_reward * (curr_score - prev_score)
 
         return (
             self.get_obs(),
