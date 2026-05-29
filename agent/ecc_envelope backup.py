@@ -1,10 +1,10 @@
-"""Envelope Q-Learning implementation."""
+"""Envelope Q-Learning with hypervolume-based action selection."""
 
 import os
-from pathlib import Path
 import time
 from collections import deque
 from typing import List, Optional, Union
+from typing_extensions import override
 
 import gymnasium as gym
 import numpy as np
@@ -12,8 +12,13 @@ import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import wandb
+
 from morl_baselines.common.buffer import ReplayBuffer
-from morl_baselines.common.evaluation import hypervolume, log_all_multi_policy_metrics
+from morl_baselines.common.evaluation import (
+    log_all_multi_policy_metrics,
+    log_episode_info,
+)
 from morl_baselines.common.morl_algorithm import MOAgent, MOPolicy
 from morl_baselines.common.networks import (
     NatureCNN,
@@ -22,23 +27,15 @@ from morl_baselines.common.networks import (
     mlp,
     polyak_update,
 )
-from morl_baselines.common.pareto import get_non_dominated
+from morl_baselines.common.performance_indicators import hypervolume
 from morl_baselines.common.prioritized_buffer import PrioritizedReplayBuffer
 from morl_baselines.common.utils import linearly_decaying_value
 from morl_baselines.common.weights import equally_spaced_weights
-from typing_extensions import override
 
-import wandb
 from networks.qnet import CNNQNet
 
-
 def random_weights(
-    dim: int,
-    n: int = 1,
-    dist: str = "dirichlet",
-    seed: Optional[int] = None,
-    rng: Optional[np.random.Generator] = None,
-    alpha=1.0,
+    dim: int, n: int = 1, dist: str = "dirichlet", seed: Optional[int] = None, rng: Optional[np.random.Generator] = None, alpha=1.0
 ) -> np.ndarray:
     """Generate random normalized weight vectors from a Gaussian or Dirichlet distribution alpha=1.
 
@@ -63,7 +60,6 @@ def random_weights(
     if n == 1:
         return w[0]
     return w
-
 
 class QNet(nn.Module):
     """Multi-objective Q-Network conditioned on the weight vector."""
@@ -113,9 +109,7 @@ class QNet(nn.Module):
                 obs = obs.unsqueeze(0)
             input = th.cat((obs, w), dim=1)
         q_values = self.net(input)
-        return q_values.view(
-            -1, self.action_dim, self.rew_dim
-        )  # Batch size X Actions X Rewards
+        return q_values.view(-1, self.action_dim, self.rew_dim)  # Batch size X Actions X Rewards
 
 
 class Envelope(MOPolicy, MOAgent):
@@ -143,6 +137,7 @@ class Envelope(MOPolicy, MOAgent):
         gamma: float = 0.99,
         max_grad_norm: Optional[float] = 1.0,
         envelope: bool = True,
+        use_hv: bool = False,
         num_sample_w: int = 4,
         per: bool = True,
         per_alpha: float = 0.6,
@@ -157,10 +152,8 @@ class Envelope(MOPolicy, MOAgent):
         device: Union[th.device, str] = "auto",
         group: Optional[str] = None,
         cnn_config: Optional[dict] = None,
-        use_hv: bool = False,
-        hv_warmup_setps: int = 5000,
-        ref_point: np.ndarray = np.array([-100.0, -100.0]),
-        dirichlet_alpha = 0.8,
+        ref_point: Optional[np.ndarray] = None,
+        num_hv_sample_w: int = 4,
     ):
         """Envelope Q-learning algorithm.
 
@@ -193,7 +186,6 @@ class Envelope(MOPolicy, MOAgent):
             seed: The seed for the random number generator.
             device: The device to use for training.
             group: The wandb group to use for logging.
-            ref_point: reference point for the hypervolume computation.
         """
         MOAgent.__init__(self, env, device=device, seed=seed)
         MOPolicy.__init__(self, device)
@@ -216,38 +208,15 @@ class Envelope(MOPolicy, MOAgent):
         self.initial_homotopy_lambda = initial_homotopy_lambda
         self.final_homotopy_lambda = final_homotopy_lambda
         self.homotopy_decay_steps = homotopy_decay_steps
-        self.use_hv = use_hv
         self.ref_point = ref_point
-        self.dirichlet_alpha = dirichlet_alpha
+        self.num_hv_sample_w = num_hv_sample_w
 
         if len(self.observation_shape) == 1:
-            self.q_net = QNet(
-                self.observation_shape,
-                self.action_dim,
-                self.reward_dim,
-                net_arch=net_arch,
-            ).to(self.device)
-            self.target_q_net = QNet(
-                self.observation_shape,
-                self.action_dim,
-                self.reward_dim,
-                net_arch=net_arch,
-            ).to(self.device)
+            self.q_net = QNet(self.observation_shape, self.action_dim, self.reward_dim, net_arch=net_arch).to(self.device)
+            self.target_q_net = QNet(self.observation_shape, self.action_dim, self.reward_dim, net_arch=net_arch).to(self.device)
         elif len(self.observation_shape) > 1:  # use CNNQNet
-            self.q_net = CNNQNet(
-                self.observation_shape,
-                self.action_dim,
-                self.reward_dim,
-                net_arch=net_arch,
-                cnn_config=cnn_config,
-            ).to(self.device)
-            self.target_q_net = CNNQNet(
-                self.observation_shape,
-                self.action_dim,
-                self.reward_dim,
-                net_arch=net_arch,
-                cnn_config=cnn_config,
-            ).to(self.device)
+            self.q_net = CNNQNet(self.observation_shape, self.action_dim, self.reward_dim, net_arch=net_arch, cnn_config=cnn_config).to(self.device)
+            self.target_q_net = CNNQNet(self.observation_shape, self.action_dim, self.reward_dim, net_arch=net_arch, cnn_config=cnn_config).to(self.device)
 
         self.target_q_net.load_state_dict(self.q_net.state_dict())
         for param in self.target_q_net.parameters():
@@ -256,6 +225,7 @@ class Envelope(MOPolicy, MOAgent):
         self.q_optim = optim.Adam(self.q_net.parameters(), lr=self.learning_rate)
 
         self.envelope = envelope
+        self.use_hv = use_hv
         self.num_sample_w = num_sample_w
         self.homotopy_lambda = self.initial_homotopy_lambda
         self._episode_rewards: deque = deque(maxlen=100)
@@ -309,12 +279,7 @@ class Envelope(MOPolicy, MOAgent):
             "seed": self.seed,
         }
 
-    def save(
-        self,
-        save_replay_buffer: bool = True,
-        save_dir: str = "weights/",
-        filename: Optional[str] = None,
-    ):
+    def save(self, save_replay_buffer: bool = True, save_dir: str = "weights/", filename: Optional[str] = None):
         """Save the model and the replay buffer if specified.
 
         Args:
@@ -348,9 +313,7 @@ class Envelope(MOPolicy, MOAgent):
             self.replay_buffer = params["replay_buffer"]
 
     def __sample_batch_experiences(self):
-        return self.replay_buffer.sample(
-            self.batch_size, to_tensor=True, device=self.device
-        )
+        return self.replay_buffer.sample(self.batch_size, to_tensor=True, device=self.device)
 
     @override
     def update(self, fixed_w: Optional[np.ndarray] = None):
@@ -378,32 +341,22 @@ class Envelope(MOPolicy, MOAgent):
                 sampled_w = th.tensor(fixed_w).float().to(self.device).unsqueeze(0)
             else:
                 sampled_w = (
-                    th.tensor(
-                        random_weights(
-                            self.reward_dim,
-                            self.num_sample_w,
-                            dist="dirichlet",
-                            rng=self.np_random,
-                            alpha=self.dirichlet_alpha,
-                        )
-                    )
+                    th.tensor(random_weights(self.reward_dim, self.num_sample_w, dist="dirichlet", rng=self.np_random, alpha=0.8))
                     .float()
                     .to(self.device)
                 )
-            w = sampled_w.repeat_interleave(
-                b_obs.size(0), 0
-            )  # repeat the weights for each sample
+            w = sampled_w.repeat_interleave(b_obs.size(0), 0)  # repeat the weights for each sample
             b_obs, b_actions, b_rewards, b_next_obs, b_dones = (
                 b_obs.repeat(self.num_sample_w, *(1 for _ in range(b_obs.dim() - 1))),
                 b_actions.repeat(self.num_sample_w, 1),
                 b_rewards.repeat(self.num_sample_w, 1),
-                b_next_obs.repeat(
-                    self.num_sample_w, *(1 for _ in range(b_next_obs.dim() - 1))
-                ),
+                b_next_obs.repeat(self.num_sample_w, *(1 for _ in range(b_next_obs.dim() - 1))),
                 b_dones.repeat(self.num_sample_w, 1),
             )
 
             with th.no_grad():
+                if self.use_hv:
+                    target = self.hv_target(b_next_obs, w, sampled_w)
                 if self.envelope:
                     target = self.envelope_target(b_next_obs, w, sampled_w)
                 else:
@@ -413,9 +366,7 @@ class Envelope(MOPolicy, MOAgent):
             q_values = self.q_net(b_obs, w)
             q_value = q_values.gather(
                 1,
-                b_actions.long()
-                .reshape(-1, 1, 1)
-                .expand(q_values.size(0), 1, q_values.size(2)),
+                b_actions.long().reshape(-1, 1, 1).expand(q_values.size(0), 1, q_values.size(2)),
             )
             q_value = q_value.reshape(-1, self.reward_dim)
 
@@ -425,18 +376,14 @@ class Envelope(MOPolicy, MOAgent):
                 wQ = th.einsum("br,br->b", q_value, w)
                 wTQ = th.einsum("br,br->b", target_q, w)
                 auxiliary_loss = F.mse_loss(wQ, wTQ)
-                critic_loss = (
-                    1 - self.homotopy_lambda
-                ) * critic_loss + self.homotopy_lambda * auxiliary_loss
+                critic_loss = (1 - self.homotopy_lambda) * critic_loss + self.homotopy_lambda * auxiliary_loss
 
             self.q_optim.zero_grad()
             critic_loss.backward()
             if self.log and self.global_step % 100 == 0:
                 wandb.log(
                     {
-                        "losses/grad_norm": get_grad_norm(
-                            self.q_net.parameters()
-                        ).item(),
+                        "losses/grad_norm": get_grad_norm(self.q_net.parameters()).item(),
                         "global_step": self.global_step,
                     },
                 )
@@ -449,15 +396,11 @@ class Envelope(MOPolicy, MOAgent):
                 td_err = (q_value[: len(b_inds)] - target_q[: len(b_inds)]).detach()
                 priority = th.einsum("sr,sr->s", td_err, w[: len(b_inds)]).abs()
                 priority = priority.cpu().numpy().flatten()
-                priority = (
-                    priority + self.replay_buffer.min_priority
-                ) ** self.per_alpha
+                priority = (priority + self.replay_buffer.min_priority) ** self.per_alpha
                 self.replay_buffer.update_priorities(b_inds, priority)
 
         if self.tau != 1 or self.global_step % self.target_net_update_freq == 0:
-            polyak_update(
-                self.q_net.parameters(), self.target_q_net.parameters(), self.tau
-            )
+            polyak_update(self.q_net.parameters(), self.target_q_net.parameters(), self.tau)
 
         if self.epsilon_decay_steps is not None:
             self.epsilon = linearly_decaying_value(
@@ -524,9 +467,9 @@ class Envelope(MOPolicy, MOAgent):
 
     @override
     def eval(self, obs: np.ndarray, w: np.ndarray) -> int:
-        obs = th.as_tensor(obs).float().to(self.device)
-        w = th.as_tensor(w).float().to(self.device)
-        return self.max_action(obs, w)
+        obs_tensor = th.as_tensor(obs).float().to(self.device)
+        w_tensor = th.as_tensor(w).float().to(self.device)
+        return self.max_action(obs_tensor, w_tensor)
 
     def act(self, obs: th.Tensor, w: th.Tensor) -> int:
         """Epsilon-greedily select an action given an observation and weight.
@@ -539,111 +482,10 @@ class Envelope(MOPolicy, MOAgent):
         """
         if self.np_random.random() < self.epsilon:
             return self.env.action_space.sample()
+        elif self.use_hv is not None:
+            return self.hv_max_action(obs)
         else:
-            # if self.use_hv:
-            #     return self.hv_max_action(obs)
-            # else:
             return self.max_action(obs, w)
-
-    def get_q_sets(self, obs):
-        """Compute the Q-set for a given observation, for all actions.
-
-        Args:
-            obs: current observation (array or tensor)
-
-        Returns:
-            A set of non-dominated Q vectors (tuples).
-        """
-        sampled_w = (
-            th.tensor(
-                random_weights(
-                    self.reward_dim,
-                    self.num_sample_w,
-                    dist="dirichlet",
-                    rng=self.np_random,
-                    alpha=1.0,
-                )
-            )
-            .float()
-            .to(self.device)
-        )
-        obs_per_weight = th.stack([obs] * self.num_sample_w)
-        q_set = self.q_net(obs_per_weight, sampled_w)  # [K, action_dim, reward_dim]
-        return q_set
-
-    def score_hypervolume(self, obs: th.Tensor) -> np.ndarray:
-        """Compute the action scores based upon the hypervolume metric.
-
-        Args:
-            obs: current observation.
-
-        Returns: a score per action (shape: [action_dim]).
-        """
-        q_sets = self.get_q_sets(obs).cpu().numpy()  # [K, action_dim, reward_dim]
-        scores = np.array(
-            [
-                hypervolume(
-                    self.ref_point,
-                    list(get_non_dominated(set(map(tuple, q_sets[:, a, :].tolist())))),
-                )
-                for a in range(self.action_dim)
-            ]
-        )
-        return scores
-
-    @th.no_grad()
-    def hv_max_action(self, obs: th.Tensor) -> int:
-        """
-        Select the action with the highest hypervolume contribution given an observation.
-        """
-        return int(np.argmax(self.score_hypervolume(obs)))
-    
-    @th.no_grad()
-    def hv_best_weight(self, obs: th.Tensor) -> np.ndarray:
-        """Select the weight whose greedy action has the highest hypervolume contribution."""
-        sampled_w = (
-            th.tensor(
-                random_weights(
-                    self.reward_dim,
-                    self.num_sample_w,
-                    dist="dirichlet",
-                    rng=self.np_random,
-                    alpha=1.0,
-                )
-            )
-            .float()
-            .to(self.device)
-        )
-        obs = th.tensor(obs).float().to(self.device)
-        obs_per_weight = th.stack([obs] * self.num_sample_w)
-        q_set = self.q_net(obs_per_weight, sampled_w)  # [K, action_dim, reward_dim]
-        hv_contributions = np.array(
-            [
-                hypervolume(
-                    self.ref_point,
-                    list(get_non_dominated(set(map(tuple, q_set[k].cpu().numpy().tolist())))),
-                )
-                for k in range(self.num_sample_w)
-            ]
-        )
-        best_k = int(np.argmax(hv_contributions))
-        return sampled_w[best_k].cpu().numpy()
-    
-    # def hv_weight_action(self, obs: th.Tensor, sampled_w: np.ndarray) -> int:
-    #     """Pick the weight that contributes most to HV, then act greedily under it."""
-    #     tensor_w = th.tensor(sampled_w).float().to(self.device)
-    #     obs_stack = th.stack([obs] * len(sampled_w))
-    #     q_vals = self.q_net(obs_stack, tensor_w).cpu().numpy()  # [K, A, R]
-        
-    #     # For each weight, pick its greedy action
-    #     scalarized = np.einsum("kr,kar->ka", sampled_w, q_vals)  # [K, A]
-    #     best_actions = np.argmax(scalarized, axis=1)  # [K]
-        
-    #     # Pick the weight whose greedy action contributes most to HV of the current front
-    #     # (or simply the one with highest marginal HV contribution)
-    #     # ... compute HV contributions per weight candidate ...
-    #     best_k = ...  # whichever weight + action has highest HV contribution
-    #     return int(best_actions[best_k])
 
     @th.no_grad()
     def max_action(self, obs: th.Tensor, w: th.Tensor) -> int:
@@ -661,9 +503,58 @@ class Envelope(MOPolicy, MOAgent):
         return max_act.detach().item()
 
     @th.no_grad()
-    def envelope_target(
-        self, obs: th.Tensor, w: th.Tensor, sampled_w: th.Tensor
-    ) -> th.Tensor:
+    def hv_max_action(self, obs: th.Tensor) -> int:
+        """Select the action whose Q-set has the highest hypervolume.
+
+        Samples num_hv_sample_w weight vectors, evaluates Q-values under each,
+        and picks the action with the largest hypervolume of its Q-value set.
+
+        Args:
+            obs: current observation (unbatched)
+
+        Returns: the action with the highest hypervolume score.
+        """
+        assert self.ref_point is not None, "ref_point must be set to use hv_max_action"
+        sampled_w = th.tensor(
+            random_weights(self.reward_dim, self.num_hv_sample_w, dist="dirichlet", rng=self.np_random)
+        ).float().to(self.device)  # [K, reward_dim]
+
+        obs_batch = th.stack([obs] * self.num_hv_sample_w)
+        q_values = self.q_net(obs_batch, sampled_w)  # [K, action_dim, reward_dim]
+        q_np = q_values.cpu().numpy()
+
+        hv_scores = np.array([
+            hypervolume(self.ref_point, list(q_np[:, a, :]))
+            for a in range(self.action_dim)
+        ])
+        return int(np.argmax(hv_scores))
+
+
+    @th.no_grad()
+    def hv_target(self, obs: th.Tensor, w: th.Tensor, sampled_w: th.Tensor) -> th.Tensor:
+        # obs: [batch * num_sample_w, obs_dim], already expanded in update()
+        batch_total = obs.size(0)
+
+        # Evaluate Q-values on online net to find HV-best action per state
+        q_values = self.q_net(obs, w)  # [batch_total, action_dim, reward_dim]
+        q_np = q_values.cpu().numpy()
+
+        best_actions = np.array([
+            np.argmax([hypervolume(self.ref_point, list(q_np[b, :, :].T[np.newaxis]))
+                    for a in range(self.action_dim)])
+            for b in range(batch_total)
+        ])
+        # Evaluate on target net for stability
+        q_target = self.target_q_net(obs, w)  # [batch_total, action_dim, reward_dim]
+        best_acts_t = th.tensor(best_actions, device=self.device).long()
+        result = q_target.gather(
+            1,
+            best_acts_t.reshape(-1, 1, 1).expand(batch_total, 1, self.reward_dim)
+        ).squeeze(1)
+        return result  # [batch_total, reward_dim]
+
+    @th.no_grad()
+    def envelope_target(self, obs: th.Tensor, w: th.Tensor, sampled_w: th.Tensor) -> th.Tensor:
         """Computes the envelope target for the given observation and weight.
 
         Args:
@@ -678,9 +569,7 @@ class Envelope(MOPolicy, MOAgent):
         # Repeat the observations for each sampled weight
         next_obs = obs.repeat_interleave(sampled_w.size(0), 0)
         # Batch size X Num sampled weights X Num actions X Num objectives
-        next_q_values = self.q_net(next_obs, W).view(
-            obs.size(0), sampled_w.size(0), self.action_dim, self.reward_dim
-        )
+        next_q_values = self.q_net(next_obs, W).view(obs.size(0), sampled_w.size(0), self.action_dim, self.reward_dim)
         # Scalarized Q values for each sampled weight
         scalarized_next_q_values = th.einsum("br,bwar->bwa", w, next_q_values)
         # Max Q values for each sampled weight
@@ -696,16 +585,10 @@ class Envelope(MOPolicy, MOAgent):
         # Index the Q-values for the max actions
         max_next_q = next_q_values_target.gather(
             2,
-            ac.unsqueeze(2)
-            .unsqueeze(3)
-            .expand(
-                next_q_values.size(0), next_q_values.size(1), 1, next_q_values.size(3)
-            ),
+            ac.unsqueeze(2).unsqueeze(3).expand(next_q_values.size(0), next_q_values.size(1), 1, next_q_values.size(3)),
         ).squeeze(2)
         # Index the Q-values for the max sampled weights
-        max_next_q = max_next_q.gather(
-            1, pref.reshape(-1, 1, 1).expand(max_next_q.size(0), 1, max_next_q.size(2))
-        ).squeeze(1)
+        max_next_q = max_next_q.gather(1, pref.reshape(-1, 1, 1).expand(max_next_q.size(0), 1, max_next_q.size(2))).squeeze(1)
         return max_next_q
 
     @th.no_grad()
@@ -726,9 +609,7 @@ class Envelope(MOPolicy, MOAgent):
         q_values_target = self.target_q_net(obs, w)
         q_values_target = q_values_target.gather(
             1,
-            max_acts.long()
-            .reshape(-1, 1, 1)
-            .expand(q_values_target.size(0), 1, q_values_target.size(2)),
+            max_acts.long().reshape(-1, 1, 1).expand(q_values_target.size(0), 1, q_values_target.size(2)),
         )
         q_values_target = q_values_target.reshape(-1, self.reward_dim)
         return q_values_target
@@ -737,6 +618,7 @@ class Envelope(MOPolicy, MOAgent):
         self,
         total_timesteps: int,
         eval_env: Optional[gym.Env] = None,
+        ref_point: Optional[np.ndarray] = None,
         known_pareto_front: Optional[List[np.ndarray]] = None,
         weight: Optional[np.ndarray] = None,
         total_episodes: Optional[int] = None,
@@ -747,14 +629,13 @@ class Envelope(MOPolicy, MOAgent):
         num_eval_weights_for_eval: int = 50,
         reset_learning_starts: bool = False,
         verbose: bool = False,
-        num_checkpoints: int = 3,
-        out_dir: str = "results/reach_goal/pareto_front",
     ):
         """Train the agent.
 
         Args:
             total_timesteps: total number of timesteps to train for.
             eval_env: environment to use for evaluation. If None, it is ignored.
+            ref_point: reference point for the hypervolume computation.
             known_pareto_front: known pareto front for the hypervolume computation.
             weight: weight vector. If None, it is randomly sampled every episode (as done in the paper).
             total_episodes: total number of episodes to train for. If None, it is ignored.
@@ -767,14 +648,12 @@ class Envelope(MOPolicy, MOAgent):
             verbose: whether to print the episode info.
         """
         if eval_env is not None:
-            assert (
-                self.ref_point is not None
-            ), "Reference point must be provided for the hypervolume computation."
+            assert ref_point is not None, "Reference point must be provided for the hypervolume computation."
         if self.log:
             self.register_additional_config(
                 {
                     "total_timesteps": total_timesteps,
-                    "ref_point": self.ref_point.tolist(),
+                    "ref_point": ref_point.tolist() if ref_point is not None else None,
                     "known_front": known_pareto_front,
                     "weight": weight if weight is not None else None,
                     "total_episodes": total_episodes,
@@ -786,8 +665,6 @@ class Envelope(MOPolicy, MOAgent):
                     "reset_learning_starts": reset_learning_starts,
                 }
             )
-        run_id = f"small__{total_timesteps}__{wandb.run.id}"
-        out_dir = Path(out_dir) / run_id
 
         self.global_step = 0 if reset_num_timesteps else self.global_step
         self.num_episodes = 0 if reset_num_timesteps else self.num_episodes
@@ -796,26 +673,13 @@ class Envelope(MOPolicy, MOAgent):
         self._start_time = time.time()
 
         num_episodes = 0
-        eval_weights = equally_spaced_weights(
-            self.reward_dim, n=num_eval_weights_for_front
-        )
+        eval_weights = equally_spaced_weights(self.reward_dim, n=num_eval_weights_for_front)
         obs, _ = self.env.reset()
 
-        if weight is not None:
-            w = np.array(weight)
-        elif self.use_hv:
-            w = self.hv_best_weight(obs)
-        else:
-            w = random_weights(
-                self.reward_dim, 1, dist="dirichlet", rng=self.np_random, alpha=self.dirichlet_alpha
-            )
-
+        w = np.array(weight) if weight is not None else random_weights(self.reward_dim, 1, dist="dirichlet", rng=self.np_random)
         tensor_w = th.tensor(w).float().to(self.device)
 
         for _ in range(1, total_timesteps + 1):
-            # checkpoint: save model
-            if self.global_step % (total_timesteps // num_checkpoints) == 0:
-                self.save(save_dir=str(out_dir), filename="model")
             if total_episodes is not None and num_episodes == total_episodes:
                 break
 
@@ -829,23 +693,16 @@ class Envelope(MOPolicy, MOAgent):
 
             self.replay_buffer.add(obs, action, vec_reward, next_obs, terminated)
             if self.global_step >= self.learning_starts:
-                self.update(
-                    fixed_w=weight
-                )  # weight is only assigned a value if training on a single weight
+                self.update(fixed_w=weight)
 
             if eval_env is not None and self.log and self.global_step % eval_freq == 0:
                 current_front = [
-                    self.policy_eval(
-                        eval_env,
-                        weights=ew,
-                        num_episodes=num_eval_episodes_for_front,
-                        log=self.log,
-                    )[3]
+                    self.policy_eval(eval_env, weights=ew, num_episodes=num_eval_episodes_for_front, log=self.log)[3]
                     for ew in eval_weights
                 ]
                 log_all_multi_policy_metrics(
                     current_front=current_front,
-                    hv_ref_point=self.ref_point,
+                    hv_ref_point=ref_point,
                     reward_dim=self.reward_dim,
                     global_step=self.global_step,
                     n_sample_weights=num_eval_weights_for_eval,
@@ -868,9 +725,7 @@ class Envelope(MOPolicy, MOAgent):
                         self._dump_logs()
 
                 if weight is None:
-                    w = random_weights(
-                        self.reward_dim, 1, dist="gaussian", rng=self.np_random
-                    )
+                    w = random_weights(self.reward_dim, 1, dist="gaussian", rng=self.np_random)
                     tensor_w = th.tensor(w).float().to(self.device)
 
             else:

@@ -19,7 +19,7 @@ class Action(IntEnum):
     LEFT = 3
 
 
-class ReachGoalEnv(gym.Env):
+class ECCReachGoalEnv(gym.Env):
     def __init__(
         self,
         grid_size=10,
@@ -54,15 +54,13 @@ class ReachGoalEnv(gym.Env):
         self.reward_space = gym.spaces.Box(
             low=np.array(
                 [
-                    [-step_penalty, -proximity_reward],
-                    [0.0, -proximity_reward * UTIL_SCALE],
+                    [-step_penalty, -proximity_reward, 0.0, -proximity_reward * UTIL_SCALE],
                 ],
                 dtype=np.float32,
             ),
             high=np.array(
                 [
-                    [terminal_reward, help_reward + proximity_reward],
-                    [0.0, help_reward * UTIL_SCALE + proximity_reward * UTIL_SCALE],
+                    [terminal_reward, help_reward + proximity_reward, 0.0, help_reward * UTIL_SCALE + proximity_reward * UTIL_SCALE],
                 ],
                 dtype=np.float32,
             ),
@@ -237,8 +235,8 @@ class ReachGoalEnv(gym.Env):
         #            task   safety
         # deont [    v0  , v1_d   ]
         # util  [    0   , v1_u   ]
-        reward = np.zeros((2, 2), dtype=np.float32)
-        reward[:, 0] -= self.step_penalty  # task penalty in all rows
+        reward = np.zeros(3, dtype=np.float32)
+        reward[0] -= self.step_penalty  # task penalty in all rows
 
         # out of bounds, cannot move (agent stays in place but still pays the step cost)
         if y_pos < 0 or y_pos >= self.grid_size or x_pos < 0 or x_pos >= self.grid_size:
@@ -261,15 +259,15 @@ class ReachGoalEnv(gym.Env):
             if not self.helped[human_idx]:
                 self.helped[human_idx] = True
                 # deontological: uniform reward per human
-                reward[0, 1] += self.help_reward
+                reward[1] += self.help_reward
                 # utilitarian: reward proportional to age, normalized so E[per-human] matches deont
-                reward[1, 1] += (
+                reward[2] += (
                     self.help_reward * self.human_ages[human_idx] * UTIL_SCALE
                 )
 
         # into goal cell
         if self.agent_pos == self.goal_pos:
-            reward[:, 0] += self.terminal_reward
+            reward[0] += self.terminal_reward
             terminated = True
 
         if self.render_mode == "human":
@@ -286,7 +284,7 @@ class ReachGoalEnv(gym.Env):
             curr_dists = np.abs(unhelped_positions - self.agent_pos).sum(axis=1)
 
             # Deontological shaping: move toward the NEAREST unhelped human (age-agnostic).
-            reward[0, 1] += self.proximity_reward * (
+            reward[1] += self.proximity_reward * (
                 prev_dists.min() - curr_dists.min()
             )
 
@@ -298,7 +296,7 @@ class ReachGoalEnv(gym.Env):
             curr_score = (
                 unhelped_ages * UTIL_SCALE / np.maximum(curr_dists, 1)
             ).max()
-            reward[1, 1] += self.proximity_reward * (curr_score - prev_score)
+            reward[2] += self.proximity_reward * (curr_score - prev_score)
 
         return (
             self.get_obs(),
@@ -321,7 +319,7 @@ class ReachGoalEnv(gym.Env):
         if self.window is None:
             pygame.init()
             self.window = pygame.display.set_mode((window_size, window_size))
-            pygame.display.set_caption("Reach Goal")
+            pygame.display.set_caption("ECC Reach Goal")
             self.clock = pygame.time.Clock()
 
         canvas = pygame.Surface((window_size, window_size))

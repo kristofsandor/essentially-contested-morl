@@ -42,14 +42,15 @@ def run_train(config) -> None:
     run_id = agent_config.pop("continue_run_id", "")
 
     print( f"[train] total_timesteps={train_config.get('total_timesteps')}")
-    env_ = make_env(env_config)
-    eval_env = make_env(env_config)
+    env_ = make_env(env_config.copy())
+    eval_env = make_env(env_config.copy())
 
     # task return ∈ [−step_penalty*max_steps, 0], help return ∈ [0, num_humans*help_reward].
     # ref_point must be strictly dominated by every Pareto solution.
     ref_point = np.array(
         [
             -env_config.get("step_penalty") * env_config.get("max_episode_steps") - 10,
+            -0.1,
             -0.1,
         ],
         dtype=np.float32,

@@ -6,6 +6,8 @@ from agent.pql import PQL
 
 from pathlib import Path
 
+from wrappers.matrix_to_vector import UtilitarianWrapper
+
 
 AGENTS = {'envelope': Envelope, 'pql': PQL}
 
@@ -28,6 +30,9 @@ def make_agent(env, agent_config):
 
 
 def make_env(env_config) -> gym.Env:
+    use_util = env_config.pop("utilitarian_wrapper", False)
     env = gym.make(**env_config)
+    if use_util:
+        env = UtilitarianWrapper(env)
     env = MORecordEpisodeStatistics(env)
     return env

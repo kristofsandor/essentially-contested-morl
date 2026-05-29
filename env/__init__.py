@@ -19,3 +19,8 @@ gym.register(
     id="goal-safe-v0",
     entry_point="env.reach_goal:ReachGoalEnv",
 )
+
+gym.register(
+    id="ecc-goal-safe-v0",
+    entry_point="env.reach_goal_ecc:ECCReachGoalEnv",
+)
