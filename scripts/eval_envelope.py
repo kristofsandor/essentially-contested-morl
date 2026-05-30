@@ -15,6 +15,23 @@ from morl_baselines.common.weights import equally_spaced_weights
 COMPONENT_NAMES = ["task", "help"]
 
 
+def wrapped_reward_space(env):
+    """Return the outermost ``reward_space`` in the wrapper chain.
+
+    ``env.unwrapped.reward_space`` skips reward wrappers (e.g. the per-interpretation
+    projections), so it reports the raw env reward dim. Here we walk outward and take
+    the first wrapper that defines ``reward_space`` — i.e. the reward space the agent
+    actually sees — falling back to the base env's.
+    """
+    e = env
+    while e is not None:
+        rs = e.__dict__.get("reward_space")
+        if rs is not None:
+            return rs
+        e = getattr(e, "env", None)
+    return env.unwrapped.reward_space
+
+
 def eval_agent(
     eval_env,
     agent,
@@ -27,11 +44,13 @@ def eval_agent(
     step_penalty,
     terminal_reward,
     proximity_reward,
+    label="",
     **__unused_kwargs,
 ) -> None:
-    print("[train] evaluating at a sweep of weights ...")
+    suffix = f"_{label}" if label else ""
+    print(f"[train] evaluating at a sweep of weights{f' ({label})' if label else ''} ...")
 
-    reward_dim = eval_env.unwrapped.reward_space.shape[0]
+    reward_dim = wrapped_reward_space(eval_env).shape[0]
     weights = equally_spaced_weights(reward_dim, n=num_eval_weights)
     eval_returns = []
     for w in weights:
@@ -50,15 +69,15 @@ def eval_agent(
         eval_returns.append(np.mean(ep_returns, axis=0))
     eval_returns = np.stack(eval_returns)  # (num_weights, 2)
 
-    np.save(out_dir / "eval_returns.npy", eval_returns)
-    np.save(out_dir / "eval_weights.npy", np.asarray(weights, dtype=np.float32))
-    print(f"[train] saved raw returns to {out_dir / 'eval_returns.npy'}")
+    np.save(out_dir / f"eval_returns{suffix}.npy", eval_returns)
+    np.save(out_dir / f"eval_weights{suffix}.npy", np.asarray(weights, dtype=np.float32))
+    print(f"[train] saved raw returns to {out_dir / f'eval_returns{suffix}.npy'}")
 
     plot_eval(
         data=eval_returns,
         weights=weights,
         out_dir=out_dir,
-        name="pareto_front",
+        name=f"pareto_front{suffix}",
         max_episode_steps=max_episode_steps,
         num_humans=num_humans,
         help_reward=help_reward,

@@ -1,4 +1,5 @@
-"""Envelope Q-Learning implementation."""
+
+"""UCB Envelope Q-Learning implementation."""
 
 import os
 from pathlib import Path
@@ -118,10 +119,10 @@ class QNet(nn.Module):
         )  # Batch size X Actions X Rewards
 
 
-class Envelope(MOPolicy, MOAgent):
-    """Envelope Q-Leaning Algorithm.
+class UCBEnvelope(MOPolicy, MOAgent):
+    """UCB Envelope Q-Leaning Algorithm.
 
-    Envelope uses a conditioned network to embed multiple policies (taking the weight as input).
+    UCB Envelope uses a conditioned network to embed multiple policies (taking the weight as input).
     The main change of this algorithm compare to a scalarized CN DQN is the target update.
     Paper: R. Yang, X. Sun, and K. Narasimhan, “A Generalized Algorithm for Multi-Objective Reinforcement Learning and Policy Adaptation,” arXiv:1908.08342 [cs], Nov. 2019, Accessed: Sep. 06, 2021. [Online]. Available: http://arxiv.org/abs/1908.08342.
     """
@@ -150,7 +151,7 @@ class Envelope(MOPolicy, MOAgent):
         final_homotopy_lambda: float = 1.0,
         homotopy_decay_steps: int = None,
         project_name: str = "MORL-Baselines",
-        experiment_name: str = "Envelope",
+        experiment_name: str = "UCBEnvelope",
         wandb_entity: Optional[str] = None,
         log: bool = True,
         seed: Optional[int] = None,
@@ -159,9 +160,15 @@ class Envelope(MOPolicy, MOAgent):
         cnn_config: Optional[dict] = None,
         use_hv: bool = False,
         ref_point: np.ndarray = np.array([-100.0, -100.0]),
-        dirichlet_alpha = 0.8,
+        dirichlet_alpha: float = 0.8,
+        ucb_beta: float = 1.0,
+        ucb_n_candidates: int = 50,
+        ucb_neighbor_dist: float = 0.2,
+        ucb_window: int = 200,
+        ucb_warmup_episodes: int = 100,
+        ucb_epsilon: float = 0.2,
     ):
-        """Envelope Q-learning algorithm.
+        """UCB Envelope Q-learning algorithm.
 
         Args:
             env: The environment to learn from.
@@ -218,6 +225,12 @@ class Envelope(MOPolicy, MOAgent):
         self.use_hv = use_hv
         self.ref_point = ref_point
         self.dirichlet_alpha = dirichlet_alpha
+        self.ucb_beta = ucb_beta
+        self.ucb_n_candidates = ucb_n_candidates
+        self.ucb_neighbor_dist = ucb_neighbor_dist
+        self.ucb_window = ucb_window
+        self.ucb_warmup_episodes = ucb_warmup_episodes
+        self.ucb_epsilon = ucb_epsilon
 
         if len(self.observation_shape) == 1:
             self.q_net = QNet(
@@ -260,6 +273,9 @@ class Envelope(MOPolicy, MOAgent):
         self._episode_rewards: deque = deque(maxlen=100)
         self._episode_lengths: deque = deque(maxlen=100)
         self._episode_mo_returns: List[np.ndarray] = []  # all MO returns seen so far
+        # Sliding window of (weight, normalised_marginal_hv) — bounded to ucb_window
+        # episodes so stale data from early training doesn't permanently bias means.
+        self._weight_hv_history: deque = deque(maxlen=self.ucb_window)
         self._n_updates: int = 0
         self._last_loss: float = float("nan")
         self._start_time: float = 0.0
@@ -598,36 +614,86 @@ class Envelope(MOPolicy, MOAgent):
         """
         return int(np.argmax(self.score_hypervolume(obs)))
     
-    @th.no_grad()
-    def hv_best_weight(self, obs: th.Tensor) -> np.ndarray:
-        """Select the weight whose greedy action has the highest hypervolume contribution."""
-        sampled_w = (
-            th.tensor(
-                random_weights(
-                    self.reward_dim,
-                    self.num_sample_w,
-                    dist="dirichlet",
-                    rng=self.np_random,
-                    alpha=1.0,
-                )
-            )
-            .float()
-            .to(self.device)
+    def _marginal_hv_contribution(self) -> float:
+        """HV gained by adding the most recent episode return to the running front.
+
+        Compares hypervolume of the non-dominated set with and without the last
+        entry in ``_episode_mo_returns``.  Call this *after* appending the new
+        return to that list.
+        """
+        if len(self._episode_mo_returns) == 1:
+            return float(hypervolume(self.ref_point, list(self._episode_mo_returns)))
+
+        front_without = list(get_non_dominated(
+            {tuple(r) for r in self._episode_mo_returns[:-1]}
+        ))
+        front_with = list(get_non_dominated(
+            {tuple(r) for r in self._episode_mo_returns}
+        ))
+        return float(
+            hypervolume(self.ref_point, front_with)
+            - hypervolume(self.ref_point, front_without)
         )
-        obs = th.tensor(obs).float().to(self.device)
-        obs_per_weight = th.stack([obs] * self.num_sample_w)
-        q_set = self.q_net(obs_per_weight, sampled_w)  # [K, action_dim, reward_dim]
-        hv_contributions = np.array(
-            [
-                hypervolume(
-                    self.ref_point,
-                    list(get_non_dominated(set(map(tuple, q_set[k].cpu().numpy().tolist())))),
-                )
-                for k in range(self.num_sample_w)
-            ]
-        )
-        best_k = int(np.argmin(hv_contributions))
-        return sampled_w[best_k].cpu().numpy()
+
+    def ucb_best_weight(self) -> np.ndarray:
+        """UCB-style weight selection inspired by UCB-MOPPO.
+
+        For each candidate weight we look up historically nearby weights and
+        score them by
+
+            UCB(w) = mean(marginal_hv) + beta * std(marginal_hv) / sqrt(n)
+
+        where *marginal_hv* is the HV contribution of the episode return that
+        was collected when a similar weight was used.  Candidates with no
+        nearby history get score=inf and are sampled first (pure exploration).
+
+        This is the key idea from UCB-MOPPO: we track *improvement* to the
+        front (marginal HV), not raw returns, so the reward-scale problem is
+        avoided — every weight region is scored by how useful training there
+        has been for expanding the front.
+        """
+        n_episodes = len(self._weight_hv_history)
+
+        # Warmup: sample uniformly so every region gets initial data before
+        # UCB scores have any meaning.
+        if n_episodes < self.ucb_warmup_episodes:
+            return random_weights(self.reward_dim, 1, dist="dirichlet", rng=self.np_random)
+
+        # ε-greedy: keep randomly probing after warmup so regions that are
+        # currently hard to learn (e.g. help-heavy) don't get permanently frozen
+        # out as the policy improves.
+        if self.np_random.random() < self.ucb_epsilon:
+            return random_weights(self.reward_dim, 1, dist="dirichlet", rng=self.np_random)
+
+        candidates = random_weights(
+            self.reward_dim, self.ucb_n_candidates, dist="dirichlet",
+            rng=self.np_random, alpha=1.0,
+        )  # [C, reward_dim]
+
+        past_w = np.array([w for w, _ in self._weight_hv_history])   # [N, reward_dim]
+        past_hv = np.array([h for _, h in self._weight_hv_history])  # [N]
+
+        N_total = len(self._weight_hv_history)
+        ucb_scores = np.full(self.ucb_n_candidates, np.inf)
+
+        for i, w_cand in enumerate(candidates):
+            # L1 distance on the simplex
+            dists = np.abs(past_w - w_cand).sum(axis=1)
+            nearby = past_hv[dists < self.ucb_neighbor_dist]
+
+            if len(nearby) == 0:
+                continue  # stays inf → will be explored
+
+            n = len(nearby)
+            mean_hv = nearby.mean()
+            # UCB1-style bonus: largest when n is small, shrinks as region is visited more
+            ucb_scores[i] = mean_hv + self.ucb_beta * np.sqrt(np.log(N_total) / n)
+
+        # Among unexplored candidates pick uniformly; otherwise take the best UCB
+        unexplored = np.where(np.isinf(ucb_scores))[0]
+        if len(unexplored) > 0:
+            return candidates[self.np_random.choice(unexplored)]
+        return candidates[int(np.argmax(ucb_scores))]
     
     # def hv_weight_action(self, obs: th.Tensor, sampled_w: np.ndarray) -> int:
     #     """Pick the weight that contributes most to HV, then act greedily under it."""
@@ -804,7 +870,7 @@ class Envelope(MOPolicy, MOAgent):
         if weight is not None:
             w = np.array(weight)
         elif self.use_hv:
-            w = self.hv_best_weight(obs)
+            w = self.ucb_best_weight()
         else:
             w = random_weights(
                 self.reward_dim, 1, dist="dirichlet", rng=self.np_random, alpha=self.dirichlet_alpha
@@ -861,15 +927,36 @@ class Envelope(MOPolicy, MOAgent):
                     ep_info = info["episode"]
                     mo_return = np.array(ep_info["r"]).flatten()
                     self._episode_mo_returns.append(mo_return)
+                    marginal_hv = self._marginal_hv_contribution()
+                    # Normalise by current total front HV so the signal is a
+                    # relative improvement fraction rather than an absolute value.
+                    # This removes the non-stationarity: episode 1 contributing
+                    # 50/50=1.0 and episode 500 contributing 0.5/500=0.001 are
+                    # now on the same scale.
+                    current_hv = hypervolume(
+                        self.ref_point,
+                        list(get_non_dominated({tuple(r) for r in self._episode_mo_returns})),
+                    )
+                    normalised_hv = marginal_hv / current_hv if current_hv > 0 else 1.0
+                    self._weight_hv_history.append((w.flatten().copy(), normalised_hv))
                     ep_rew = np.dot(w.flatten(), mo_return)
                     self._episode_rewards.append(float(ep_rew))
                     self._episode_lengths.append(int(ep_info["l"]))
+                    if self.log and self.num_episodes % 10 == 0:
+                        wandb.log({
+                            "ucb/marginal_hv": marginal_hv,
+                            "ucb/normalised_hv": normalised_hv,
+                            "ucb/total_hv": current_hv,
+                            "ucb/history_size": len(self._weight_hv_history),
+                            "ucb/in_warmup": int(len(self._weight_hv_history) < self.ucb_warmup_episodes),
+                            "global_step": self.global_step,
+                        })
                     if verbose:
                         self._dump_logs()
 
                 if weight is None:
                     if self.use_hv:
-                        w = self.hv_best_weight(obs)
+                        w = self.ucb_best_weight()
                     else:
                         w = random_weights(
                             self.reward_dim, 1, dist="dirichlet", rng=self.np_random, alpha=self.dirichlet_alpha

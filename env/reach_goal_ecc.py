@@ -47,23 +47,30 @@ class ECCReachGoalEnv(gym.Env):
                 low=0, high=1, shape=(4 + self.num_humans * 4,), dtype=float32
             )
 
-        # Reward is now a 2x2 matrix:
-        #   row 0 (deontological): [task,  deont_help]
-        #   row 1 (utilitarian):   [0,     util_help]
-        # Wrappers downstream project this to whatever (2,) shape Envelope wants.
+        # Reward is a flattened per-interpretation matrix with one row per ethical
+        # interpretation, emitted row-major as a single vector:
+        #   row 0 (deontological): [task, deont_help]
+        #   row 1 (utilitarian):   [task, util_help]
+        # -> [task, deont_help, task, util_help]
+        # Column 0 (task) is shared across interpretations. ECCEnvelope reshapes
+        # this back into rows and trains each network on a single row. Keeping the
+        # reward flat lets MORecordEpisodeStatistics / the replay buffer treat it
+        # as an ordinary vector reward.
         self.reward_space = gym.spaces.Box(
             low=np.array(
                 [
-                    [-step_penalty, -proximity_reward, 0.0, -proximity_reward * UTIL_SCALE],
+                    [-step_penalty, -proximity_reward],
+                    [-step_penalty, -proximity_reward * UTIL_SCALE],
                 ],
                 dtype=np.float32,
-            ),
+            ).flatten(),
             high=np.array(
                 [
-                    [terminal_reward, help_reward + proximity_reward, 0.0, help_reward * UTIL_SCALE + proximity_reward * UTIL_SCALE],
+                    [terminal_reward, help_reward + proximity_reward],
+                    [terminal_reward, (help_reward + proximity_reward) * UTIL_SCALE],
                 ],
                 dtype=np.float32,
-            ),
+            ).flatten(),
         )
 
         self.help_reward = help_reward
@@ -231,18 +238,18 @@ class ECCReachGoalEnv(gym.Env):
             raise Exception(f"bad action {action}")
 
         terminated = False
-        # Reward is a 2x2 matrix. Rows = interpretations, columns = objectives.
-        #            task   safety
+        # Reward matrix. Rows = interpretations, columns = objectives.
+        #            task   help
         # deont [    v0  , v1_d   ]
-        # util  [    0   , v1_u   ]
-        reward = np.zeros(3, dtype=np.float32)
-        reward[0] -= self.step_penalty  # task penalty in all rows
+        # util  [    v0  , v1_u   ]
+        reward = np.zeros((2, 2), dtype=np.float32)
+        reward[:, 0] -= self.step_penalty  # shared task penalty in every row
 
         # out of bounds, cannot move (agent stays in place but still pays the step cost)
         if y_pos < 0 or y_pos >= self.grid_size or x_pos < 0 or x_pos >= self.grid_size:
             return (
                 self.get_obs(),
-                reward,
+                reward.flatten(),
                 terminated,
                 False,
                 {},
@@ -259,15 +266,15 @@ class ECCReachGoalEnv(gym.Env):
             if not self.helped[human_idx]:
                 self.helped[human_idx] = True
                 # deontological: uniform reward per human
-                reward[1] += self.help_reward
+                reward[0, 1] += self.help_reward
                 # utilitarian: reward proportional to age, normalized so E[per-human] matches deont
-                reward[2] += (
+                reward[1, 1] += (
                     self.help_reward * self.human_ages[human_idx] * UTIL_SCALE
                 )
 
         # into goal cell
         if self.agent_pos == self.goal_pos:
-            reward[0] += self.terminal_reward
+            reward[:, 0] += self.terminal_reward  # shared task reward
             terminated = True
 
         if self.render_mode == "human":
@@ -284,7 +291,7 @@ class ECCReachGoalEnv(gym.Env):
             curr_dists = np.abs(unhelped_positions - self.agent_pos).sum(axis=1)
 
             # Deontological shaping: move toward the NEAREST unhelped human (age-agnostic).
-            reward[1] += self.proximity_reward * (
+            reward[0, 1] += self.proximity_reward * (
                 prev_dists.min() - curr_dists.min()
             )
 
@@ -296,11 +303,11 @@ class ECCReachGoalEnv(gym.Env):
             curr_score = (
                 unhelped_ages * UTIL_SCALE / np.maximum(curr_dists, 1)
             ).max()
-            reward[2] += self.proximity_reward * (curr_score - prev_score)
+            reward[1, 1] += self.proximity_reward * (curr_score - prev_score)
 
         return (
             self.get_obs(),
-            reward,
+            reward.flatten(),
             terminated,
             False,
             {},

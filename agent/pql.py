@@ -187,7 +187,7 @@ class PQL(MOAgent):
         if self.np_random.uniform(0, 1) < self.epsilon:
             return self.np_random.integers(self.num_actions)
         else:
-            action_scores = score_func(state)
+            action_scores = self.score_hypervolume(state)
             return self.np_random.choice(
                 np.argwhere(action_scores == np.max(action_scores)).flatten()
             )

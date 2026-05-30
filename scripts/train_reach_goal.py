@@ -34,12 +34,16 @@ import env  # noqa: F401, registers the envs on import
 
 def run_train(config) -> None:
 
+    general_config = config.get("general", {})
     env_config = config["env"]
     agent_config = config["agent"]
     train_config = config["train"]
     eval_config = config["eval"]
 
-    run_id = agent_config.pop("continue_run_id", "")
+    run_id = general_config.get("continue_run_id", "")
+    # ECC trains per-interpretation nets on a 2-objective [task, help] weight, so it
+    # must be evaluated on each interpretation's projection rather than the raw reward.
+    use_ecc = general_config.get("use_ecc", agent_config.get("algorithm") == "ecc_envelope")
 
     print( f"[train] total_timesteps={train_config.get('total_timesteps')}")
     env_ = make_env(env_config.copy())
@@ -50,7 +54,6 @@ def run_train(config) -> None:
     ref_point = np.array(
         [
             -env_config.get("step_penalty") * env_config.get("max_episode_steps") - 10,
-            -0.1,
             -0.1,
         ],
         dtype=np.float32,
@@ -66,6 +69,7 @@ def run_train(config) -> None:
 
     agent.register_additional_config(
         {
+            "general": general_config,
             "train": train_config,
             "env": env_config,
             "agent": agent_config,
@@ -73,13 +77,21 @@ def run_train(config) -> None:
         }
     )
 
+    # Snapshot the agent implementation to W&B's Code tab for this run, so the run
+    # records exactly which learner source produced it.
+    if getattr(agent, "log", False) and wandb.run is not None:
+        agent_src = "agent/ecc_envelope.py" if use_ecc else "agent/envelope.py"
+        wandb.run.log_code(
+            root=".",
+            include_fn=lambda path, *_: path.replace("\\", "/").endswith(agent_src),
+        )
+
     print("[train] training Envelope ...")
     agent.train(eval_env=eval_env, **train_config)
 
-    use_small = env_config.get("grid_size") <= 5
-    run_id = f"{"small" if use_small else "medium"}__{train_config.get('total_timesteps')}__{wandb.run.id}"
+    run_id = f"small__{train_config.get('total_timesteps')}__{wandb.run.id}"
 
-    out_dir = eval_config.pop("out_dir", "results/reach_goal/pareto_front")
+    out_dir = train_config.get("out_dir", "results/reach_goal/pareto_front")
     out_dir = Path(out_dir) / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -92,7 +104,20 @@ def run_train(config) -> None:
     except Exception as e:
         print(f"[train] error saving agent: {e}")
 
-    eval_agent(eval_env, agent, out_dir, **eval_config, **env_config)
+    # eval_config may carry its own out_dir; the run's out_dir (above) wins.
+    eval_config.pop("out_dir", None)
+
+    if use_ecc:
+        # The ECC policy is conditioned on a 2-objective [task, help] weight, so it
+        # is evaluated on each ethical interpretation's 2-objective projection of the
+        # reward rather than on the raw multi-interpretation env reward.
+        for interp in ("deontological", "utilitarian"):
+            interp_env = make_env({**env_config, f"{interp}_wrapper": True})
+            eval_agent(
+                interp_env, agent, out_dir, label=interp, **eval_config, **env_config
+            )
+    else:
+        eval_agent(eval_env, agent, out_dir, **eval_config, **env_config)
 
 
 # ---------------------------------------------------------------------------

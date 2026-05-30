@@ -11,18 +11,19 @@
         "obs_as_grid": false
     },
     "train": {
-        "total_timesteps": 50000,
-        "eval_freq": 5000,
+        "total_timesteps": 350000,
+        "eval_freq": 10000,
         "num_eval_weights_for_front": 25,
         "num_eval_episodes_for_front": 5,
         "num_eval_weights_for_eval": 25,
         "verbose": true,
         "num_checkpoints": 3,
-        "out_dir": "results/reach_goal/pareto_front_small"
+        "out_dir": "results/reach_goal/pareto_front"
     },
     "eval": {
         "num_eval_episodes": 50,
         "num_eval_weights": 50,
+        "out_dir": "results/reach_goal/pareto_front_small"
     },
     "agent": {
         "algorithm": "ucb_envelope",
@@ -44,6 +45,7 @@
         "num_sample_w": 5,
         "log": true,
         "use_hv": true,
-        "dirichlet_alpha": 0.8
+        "dirichlet_alpha": 0.8,
+        
     }
 }

@@ -1,15 +1,17 @@
 import gymnasium as gym
 from mo_gymnasium.wrappers.wrappers import MORecordEpisodeStatistics
 
+from agent.ecc_envelope import ECCEnvelope
 from agent.envelope import Envelope
 from agent.pql import PQL
 
 from pathlib import Path
 
-from wrappers.matrix_to_vector import UtilitarianWrapper
+from agent.ucb_envelope import UCBEnvelope
+from wrappers.matrix_to_vector import DeontologicalWrapper, UtilitarianWrapper
 
 
-AGENTS = {'envelope': Envelope, 'pql': PQL}
+AGENTS = {'envelope': Envelope, 'pql': PQL, 'ucb_envelope': UCBEnvelope, 'ecc_envelope': ECCEnvelope}
 
 def find_model_path(run_id):
     base = 'results/reach_goal'
@@ -31,8 +33,18 @@ def make_agent(env, agent_config):
 
 def make_env(env_config) -> gym.Env:
     use_util = env_config.pop("utilitarian_wrapper", False)
+    use_deont = env_config.pop("deontological_wrapper", False)
     env = gym.make(**env_config)
     if use_util:
         env = UtilitarianWrapper(env)
+    elif use_deont:
+        env = DeontologicalWrapper(env)
+    reward_wrapped = env  # reward space the agent actually sees
     env = MORecordEpisodeStatistics(env)
+    # MORecordEpisodeStatistics infers its accumulator dim from env.unwrapped, which
+    # bypasses reward wrappers. Sync it to the (possibly projected) reward space.
+    if use_util or use_deont:
+        rdim = reward_wrapped.reward_space.shape[0]
+        env.reward_dim = rdim
+        env.rewards_shape = (rdim,)
     return env
