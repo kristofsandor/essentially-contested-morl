@@ -179,6 +179,10 @@ class ECCEnvelope(MOPolicy, MOAgent):
         ucb_window: int = 200,
         ucb_warmup_episodes: int = 100,
         ucb_epsilon: float = 0.2,
+        use_hv_meta: bool = False,
+        hv_meta_base: float = 0.5,
+        hv_meta_scale: float = 1.5,
+        hv_meta_per_interp: bool = True,
     ):
         """Envelope Q-learning algorithm.
 
@@ -245,6 +249,15 @@ class ECCEnvelope(MOPolicy, MOAgent):
         self.ucb_window = ucb_window
         self.ucb_warmup_episodes = ucb_warmup_episodes
         self.ucb_epsilon = ucb_epsilon
+        # Hypervolume-guided weight adaptation (Lu et al. 2025, arXiv:2509.11452, Alg. 1).
+        # Amplifies the reward signal via a meta-reward r_pareto = base + scale * tanh(dHV),
+        # where dHV is the hypervolume contribution of the episode return to the Pareto set B.
+        # Orthogonal to and combinable with the UCB weight selection above; gated behind
+        # use_hv_meta so default behaviour is unchanged.
+        self.use_hv_meta = use_hv_meta
+        self.hv_meta_base = hv_meta_base
+        self.hv_meta_scale = hv_meta_scale
+        self.hv_meta_per_interp = hv_meta_per_interp
 
         # The env emits a flattened per-interpretation reward matrix as a single
         # vector of length num_interps * net_reward_dim, laid out row-major (one
@@ -318,6 +331,14 @@ class ECCEnvelope(MOPolicy, MOAgent):
         self._weight_hv_history: deque = deque(maxlen=self.ucb_window)
         # Current episode's interp weight (set at reset, used by max_action / get_q_sets).
         self._episode_interp_weight: np.ndarray = np.array(self.interp_weight, dtype=np.float32)
+        # HV-guided meta-reward state. _meta_reward is the running r_pareto applied to the
+        # reward at collection time; initialised to 1.0 ("no HV contribution yet", Alg. 1
+        # line 5). _hv_meta_buffer holds the per-interp Pareto set B_i (lists of return
+        # tuples); _hv_meta_buffer_global is the agent-objective-space buffer used when
+        # hv_meta_per_interp is False.
+        self._meta_reward: np.ndarray = np.ones(self.num_interps, dtype=np.float32)
+        self._hv_meta_buffer: List[List[tuple]] = [[] for _ in range(self.num_interps)]
+        self._hv_meta_buffer_global: List[tuple] = []
         self._n_updates: int = 0
         self._last_loss: float = float("nan")
         self._start_time: float = 0.0
@@ -365,6 +386,10 @@ class ECCEnvelope(MOPolicy, MOAgent):
             "homotopy_decay_steps": self.homotopy_decay_steps,
             "learning_starts": self.learning_starts,
             "seed": self.seed,
+            "use_hv_meta": self.use_hv_meta,
+            "hv_meta_base": self.hv_meta_base,
+            "hv_meta_scale": self.hv_meta_scale,
+            "hv_meta_per_interp": self.hv_meta_per_interp,
         }
 
     def save(
@@ -745,6 +770,60 @@ class ECCEnvelope(MOPolicy, MOAgent):
         normalised = total_marginal / total_current if total_current > 0 else 1.0
         return float(normalised), float(total_current)
 
+    def _update_hv_meta_reward(
+        self, per_interp_return: np.ndarray, agent_return: np.ndarray
+    ) -> tuple:
+        """Hypervolume-guided meta-reward update (Lu et al. 2025, Alg. 1).
+
+        Computes the hypervolume contribution dHV of the latest episode return to the
+        Pareto set B and maps it to a meta-reward r_pareto = base + scale * tanh(dHV).
+        The result is stored in ``self._meta_reward`` and used to scale rewards collected
+        in subsequent episodes (matching the paper's use of step t-1's r_pareto at step t).
+        Non-dominated returns are inserted into B so it tracks the current front.
+
+        Args:
+            per_interp_return: episode MO return per interpretation,
+                shape [num_interps, net_reward_dim] (unscaled env return).
+            agent_return: the interp-collapsed return, shape [net_reward_dim], used for
+                the global (non per-interp) buffer.
+
+        Returns: (meta_reward, delta_hv) numpy arrays of length num_interps.
+        """
+        def _contribution(buf: List[tuple], point: np.ndarray) -> tuple:
+            """Return (delta_hv, new_front) for adding ``point`` to Pareto set ``buf``."""
+            hv_before = hypervolume(self.ref_point, buf) if len(buf) > 0 else 0.0
+            candidate = list({tuple(p) for p in buf} | {tuple(point)})
+            new_front = list(get_non_dominated(set(candidate)))
+            hv_after = hypervolume(self.ref_point, new_front)
+            return float(hv_after - hv_before), new_front
+
+        meta = np.ones(self.num_interps, dtype=np.float32)
+        deltas = np.zeros(self.num_interps, dtype=np.float32)
+
+        if self.hv_meta_per_interp:
+            for i in range(self.num_interps):
+                delta, new_front = _contribution(
+                    self._hv_meta_buffer[i], per_interp_return[i]
+                )
+                # dHV (a contribution) is non-negative; guard against tiny negatives.
+                delta = max(delta, 0.0)
+                m = self.hv_meta_base + self.hv_meta_scale * np.tanh(delta)
+                meta[i] = max(m, 0.0)
+                deltas[i] = delta
+                if delta > 0:
+                    self._hv_meta_buffer[i] = new_front
+        else:
+            delta, new_front = _contribution(self._hv_meta_buffer_global, agent_return)
+            delta = max(delta, 0.0)
+            m = max(self.hv_meta_base + self.hv_meta_scale * np.tanh(delta), 0.0)
+            meta[:] = m
+            deltas[:] = delta
+            if delta > 0:
+                self._hv_meta_buffer_global = new_front
+
+        self._meta_reward = meta
+        return meta, deltas
+
     def ucb_best_weight_and_interp(self) -> tuple:
         """UCB-style joint selection of objective weight and interpretation weight.
 
@@ -1012,7 +1091,19 @@ class ECCEnvelope(MOPolicy, MOAgent):
             next_obs, vec_reward, terminated, truncated, info = self.env.step(action)
             self.global_step += 1
 
-            self.replay_buffer.add(obs, action, vec_reward, next_obs, terminated)
+            # HV-guided shaping: scale the reward by the running meta-reward (r_pareto from
+            # the previous episode) at collection time. The unscaled vec_reward is kept for
+            # episode statistics / HV bookkeeping below.
+            if self.use_hv_meta:
+                stored_reward = (
+                    np.asarray(vec_reward, dtype=np.float32).reshape(
+                        self.num_interps, self.net_reward_dim
+                    )
+                    * self._meta_reward[:, None]
+                ).flatten()
+            else:
+                stored_reward = vec_reward
+            self.replay_buffer.add(obs, action, stored_reward, next_obs, terminated)
             if self.global_step >= self.learning_starts:
                 self.update(
                     fixed_w=weight
@@ -1049,6 +1140,18 @@ class ECCEnvelope(MOPolicy, MOAgent):
                     # Combined agent-space return (for logging / episode reward).
                     mo_return = self._to_agent_objective(flat_return)
                     self._episode_mo_returns.append(mo_return)
+                    # HV-guided meta-reward: update r_pareto from this episode's HV
+                    # contribution; it shapes rewards collected in following episodes.
+                    if self.use_hv_meta:
+                        meta_reward, meta_delta = self._update_hv_meta_reward(
+                            per_interp_return, mo_return
+                        )
+                        if self.log and self.num_episodes % 10 == 0:
+                            wandb.log({
+                                "hv_meta/r_pareto_mean": float(meta_reward.mean()),
+                                "hv_meta/delta_hv_mean": float(meta_delta.mean()),
+                                "global_step": self.global_step,
+                            })
                     # UCB signal: sum of normalised marginal HV across interpretations.
                     normalised_hv, total_hv = self._marginal_hv_sum()
                     joint_key = np.concatenate([w.flatten(), self._episode_interp_weight.flatten()])

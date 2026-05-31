@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rank-one interpretation decomposition — interactive explainer</title>
+<style>
+  :root{
+    --color-text-primary:#1a1a18;
+    --color-text-secondary:#6b6b66;
+    --color-text-tertiary:#9a9a93;
+    --color-text-info:#2563eb;
+    --color-background-primary:#ffffff;
+    --color-background-secondary:#f4f3ee;
+    --color-background-info:#e8f0fe;
+    --color-background-success:#e6f4ea;
+    --color-border-tertiary:rgba(0,0,0,0.15);
+    --color-border-secondary:rgba(0,0,0,0.30);
+    --color-border-primary:rgba(0,0,0,0.40);
+    --border-radius-md:8px;
+    --border-radius-lg:12px;
+    --font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --color-text-primary:#ededeb;
+      --color-text-secondary:#a8a8a2;
+      --color-text-tertiary:#7c7c76;
+      --color-text-info:#7ba6ff;
+      --color-background-primary:#1f1f1d;
+      --color-background-secondary:#2a2a27;
+      --color-background-info:#1e2a44;
+      --color-background-success:#1c3326;
+      --color-border-tertiary:rgba(255,255,255,0.15);
+      --color-border-secondary:rgba(255,255,255,0.30);
+      --color-border-primary:rgba(255,255,255,0.45);
+    }
+  }
+  html,body{margin:0;padding:0;background:var(--color-background-primary);}
+  body{font-family:var(--font-sans);color:var(--color-text-primary);line-height:1.6;}
+  .wrap{max-width:740px;margin:0 auto;padding:2rem 1.25rem 3rem;}
+  h1{font-size:22px;font-weight:500;margin:0 0 0.25rem;}
+  .lede{font-size:14px;color:var(--color-text-secondary);margin:0 0 1.75rem;}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.92em;}
+  input[type=range]{accent-color:var(--color-text-info);}
+  .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Rank-one interpretation decomposition</h1>
+  <p class="lede">Drag <code>K</code> (interpretations) and <code>d</code> (base objectives) to see how factoring the preference weight <code>W = β ⊗ w</code> shrinks the preference space and the learning cost.</p>
+
+<h2 class="sr-only">Interactive explainer of how factoring the preference weight into beta-cross-w reduces preference dimensionality and learning cost across K interpretations and d base objectives.</h2>
+<div style="padding: 0.5rem 0; font-family: var(--font-sans); color: var(--color-text-primary); line-height: 1.6;">
+
+  <div style="display:flex; gap:24px; flex-wrap:wrap; margin-bottom:1.25rem;">
+    <div style="flex:1; min-width:200px;">
+      <label style="font-size:13px; color:var(--color-text-secondary);">interpretations &nbsp;K = <span id="kval">2</span></label>
+      <input id="kSlider" type="range" min="1" max="4" step="1" value="2" style="width:100%;">
+    </div>
+    <div style="flex:1; min-width:200px;">
+      <label style="font-size:13px; color:var(--color-text-secondary);">base objectives &nbsp;d = <span id="dval">2</span></label>
+      <input id="dSlider" type="range" min="1" max="4" step="1" value="2" style="width:100%;">
+    </div>
+  </div>
+
+  <div style="font-size:14px; margin-bottom:6px; color:var(--color-text-secondary);">The full preference vector <code>W</code> over all <span id="Dlabel">4</span> objectives, arranged as a K×d matrix. Rank-one means every entry is <code>W<sub>ij</sub> = β<sub>i</sub>·w<sub>j</sub></code>:</div>
+
+  <div style="display:flex; gap:18px; align-items:center; flex-wrap:wrap; margin-bottom:1.25rem;">
+    <div id="matrixWrap"></div>
+    <div style="font-size:22px; color:var(--color-text-tertiary);">=</div>
+    <div id="betaWrap"></div>
+    <div style="font-size:18px; color:var(--color-text-tertiary);">⊗</div>
+    <div id="wWrap"></div>
+  </div>
+
+  <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:1.25rem;">
+    <div style="background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:1rem;">
+      <div style="font-size:13px; color:var(--color-text-secondary);">full preference dim<br>(monolithic net)</div>
+      <div style="font-size:24px; font-weight:500;">Kd − 1 = <span id="fullDim">3</span></div>
+    </div>
+    <div style="background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:1rem;">
+      <div style="font-size:13px; color:var(--color-text-secondary);">factored preference dim<br>(d−1)+(K−1)</div>
+      <div style="font-size:24px; font-weight:500;"><span id="facDim">2</span></div>
+    </div>
+    <div style="background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:1rem;">
+      <div style="font-size:13px; color:var(--color-text-secondary);">weight-cover cost<br>ε = 0.1</div>
+      <div style="font-size:15px; font-weight:500; line-height:1.4; margin-top:4px;">
+        mono ≈ <span id="monoCost">1e3</span><br>
+        <span style="color:var(--color-text-secondary);">ours ≈ <span id="ourCost">2e2</span></span>
+      </div>
+    </div>
+  </div>
+
+  <div id="ccsNote" style="font-size:13px; color:var(--color-text-secondary); margin-bottom:1rem;"></div>
+
+  <div style="font-size:14px; margin-bottom:8px; color:var(--color-text-secondary);">Each network learns a convex coverage set (CCS) over its own small simplex. As the shared <code>w</code> sweeps Δ<sup>d−1</sup>, the greedy policy traces the convex front; β only re-mixes the two fronts:</div>
+  <svg id="ccsSvg" viewBox="0 0 680 230" xmlns="http://www.w3.org/2000/svg" role="img" style="width:100%; height:auto;">
+    <title>Two per-interpretation convex coverage sets combined by an inter-interpretation weight beta</title>
+  </svg>
+
+  <div style="font-size:14px; margin:1rem 0 8px; color:var(--color-text-secondary);">What depends on what at decision time:</div>
+  <svg id="depSvg" viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg" role="img" style="width:100%; height:auto;">
+    <title>Dependency graph: observation and shared weight w feed each Q network, scalarized by w then aggregated by beta into one action; UCB selects w and beta jointly.</title>
+  </svg>
+
+</div>
+</div>
+
+<script>
+(function(){
+  function fmtPow(p){ if(p>=6) return "10^"+p; var v=Math.pow(10,p); return v.toLocaleString(); }
+  function cell(txt, sub){
+    return '<div style="width:62px;height:38px;display:flex;align-items:center;justify-content:center;'
+      +'border:0.5px solid var(--color-border-secondary);border-radius:6px;font-size:13px;'
+      +(sub?'background:var(--color-background-secondary);':'')+'">'+txt+'</div>';
+  }
+  function grid(rows, cols, fn, gap){
+    var h='<div style="display:grid;grid-template-columns:repeat('+cols+',auto);gap:'+(gap||6)+'px;">';
+    for(var i=0;i<rows;i++) for(var j=0;j<cols;j++) h+=fn(i,j);
+    return h+'</div>';
+  }
+  var k=2,d=2;
+  function render(){
+    document.getElementById('kval').textContent=k;
+    document.getElementById('dval').textContent=d;
+    document.getElementById('Dlabel').textContent=k*d;
+    document.getElementById('matrixWrap').innerHTML = grid(k,d,function(i,j){
+      return cell('β<sub>'+(i+1)+'</sub>w<sub>'+(j+1)+'</sub>');
+    });
+    document.getElementById('betaWrap').innerHTML = grid(k,1,function(i){
+      return cell('β<sub>'+(i+1)+'</sub>', true);
+    });
+    document.getElementById('wWrap').innerHTML = grid(1,d,function(_,j){
+      return cell('w<sub>'+(j+1)+'</sub>', true);
+    });
+    var fullDim=k*d-1, facDim=(d-1)+(k-1);
+    document.getElementById('fullDim').textContent=fullDim;
+    document.getElementById('facDim').textContent=facDim;
+    document.getElementById('monoCost').textContent=fmtPow(fullDim);
+    document.getElementById('ourCost').textContent=(k>1? k+'×':'')+fmtPow(d-1);
+    var saved = fullDim-facDim;
+    document.getElementById('ccsNote').innerHTML = (saved>0
+      ? 'Free preference parameters drop from <b>'+fullDim+'</b> to <b>'+facDim+'</b>. '
+        +'The rank-one assumption forbids '+saved+' degree'+(saved>1?'s':'')+' of freedom — interpretations may differ in overall weight β, but not in their internal trade-off w.'
+      : 'With these values the two families coincide — rank-one costs nothing here.');
+    drawCCS();
+    drawDep();
+  }
+
+  function drawCCS(){
+    var s=document.getElementById('ccsSvg');
+    var ns='http://www.w3.org/2000/svg';
+    s.innerHTML='<title>CCS</title>';
+    function frontGroup(cx,cy,label,cls){
+      var g=document.createElementNS(ns,'g');
+      var ax=document.createElementNS(ns,'path');
+      ax.setAttribute('d','M '+cx+' '+(cy-90)+' L '+cx+' '+cy+' L '+(cx+150)+' '+cy);
+      ax.setAttribute('fill','none'); ax.setAttribute('stroke','var(--color-border-secondary)'); ax.setAttribute('stroke-width','1');
+      g.appendChild(ax);
+      var p=document.createElementNS(ns,'path');
+      p.setAttribute('d','M '+cx+' '+(cy-85)+' Q '+(cx+95)+' '+(cy-78)+' '+(cx+135)+' '+(cy-8));
+      p.setAttribute('fill','none'); p.setAttribute('stroke',cls); p.setAttribute('stroke-width','2.5');
+      g.appendChild(p);
+      [[cx,cy-85],[cx+58,cy-72],[cx+108,cy-44],[cx+135,cy-8]].forEach(function(pt){
+        var c=document.createElementNS(ns,'circle');
+        c.setAttribute('cx',pt[0]); c.setAttribute('cy',pt[1]); c.setAttribute('r','4'); c.setAttribute('fill',cls);
+        g.appendChild(c);
+      });
+      var t=document.createElementNS(ns,'text');
+      t.setAttribute('x',cx+5); t.setAttribute('y',cy+22); t.setAttribute('font-size','13'); t.setAttribute('fill','var(--color-text-secondary)');
+      t.textContent=label;
+      g.appendChild(t);
+      return g;
+    }
+    s.appendChild(frontGroup(40,120,'Q₁ front  (interp 1, over Δ^{d−1})','var(--color-text-info)'));
+    if(k>1) s.appendChild(frontGroup(380,120,'Q₂ front  (interp 2)','#0d9488'));
+    var t=document.createElementNS(ns,'text');
+    t.setAttribute('x',340); t.setAttribute('y',215); t.setAttribute('text-anchor','middle');
+    t.setAttribute('font-size','13'); t.setAttribute('fill','var(--color-text-tertiary)');
+    t.textContent = k>1 ? 'combined value = β₁·(w·Q₁) + β₂·(w·Q₂)  →  one shared action' : 'single interpretation: ordinary envelope CCS';
+    s.appendChild(t);
+  }
+
+  function box(s,x,y,w,h,title,sub,fill){
+    var ns='http://www.w3.org/2000/svg';
+    var g=document.createElementNS(ns,'g');
+    var r=document.createElementNS(ns,'rect');
+    r.setAttribute('x',x);r.setAttribute('y',y);r.setAttribute('width',w);r.setAttribute('height',h);
+    r.setAttribute('rx','8');r.setAttribute('fill',fill||'var(--color-background-secondary)');
+    r.setAttribute('stroke','var(--color-border-secondary)');r.setAttribute('stroke-width','0.5');
+    g.appendChild(r);
+    var t=document.createElementNS(ns,'text');
+    t.setAttribute('x',x+w/2);t.setAttribute('y',sub?y+h/2-6:y+h/2);t.setAttribute('text-anchor','middle');
+    t.setAttribute('dominant-baseline','central');t.setAttribute('font-size','13');t.setAttribute('font-weight','500');
+    t.setAttribute('fill','var(--color-text-primary)');t.textContent=title;g.appendChild(t);
+    if(sub){var st=document.createElementNS(ns,'text');
+      st.setAttribute('x',x+w/2);st.setAttribute('y',y+h/2+12);st.setAttribute('text-anchor','middle');
+      st.setAttribute('dominant-baseline','central');st.setAttribute('font-size','11');
+      st.setAttribute('fill','var(--color-text-secondary)');st.textContent=sub;g.appendChild(st);}
+    s.appendChild(g);
+  }
+  function arrow(s,x1,y1,x2,y2){
+    var ns='http://www.w3.org/2000/svg';
+    var l=document.createElementNS(ns,'line');
+    l.setAttribute('x1',x1);l.setAttribute('y1',y1);l.setAttribute('x2',x2);l.setAttribute('y2',y2);
+    l.setAttribute('stroke','var(--color-border-primary)');l.setAttribute('stroke-width','1.4');
+    l.setAttribute('marker-end','url(#ar)');s.appendChild(l);
+  }
+  function drawDep(){
+    var s=document.getElementById('depSvg');
+    s.innerHTML='<title>dep</title><defs><marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="var(--color-border-primary)" stroke-width="1.5"/></marker></defs>';
+    box(s,20,100,90,48,'obs s','state');
+    box(s,20,30,90,48,'w','shared, Δ^{d−1}','var(--color-background-info)');
+    box(s,20,170,90,48,'β','credences Δ^{K−1}','var(--color-background-info)');
+    box(s,180,40,120,48,'Q₁(s,·,w)','interp 1');
+    box(s,180,135,120,48,'Q'+(k>1?'…K':'?'),(k>1?'interp K':'interp'));
+    box(s,360,40,120,48,'w·Qᵢ','scalarize');
+    box(s,360,135,120,48,'w·Qᵢ','scalarize');
+    box(s,520,88,140,52,'Σ βᵢ (w·Qᵢ)','argmax → action','var(--color-background-success)');
+    arrow(s,110,124,178,70); arrow(s,110,124,178,159);
+    arrow(s,110,54,178,58); arrow(s,110,54,178,150);
+    arrow(s,300,64,358,64); arrow(s,300,159,358,159);
+    arrow(s,480,64,558,100); arrow(s,480,159,558,128);
+    arrow(s,110,194,558,130);
+    var ns='http://www.w3.org/2000/svg';
+    var t=document.createElementNS(ns,'text');
+    t.setAttribute('x',340);t.setAttribute('y',240);t.setAttribute('text-anchor','middle');
+    t.setAttribute('font-size','12');t.setAttribute('fill','var(--color-text-tertiary)');
+    t.textContent='UCB picks (w, β) jointly by summed hypervolume gain · Bellman update still samples w at random';
+    s.appendChild(t);
+  }
+
+  document.getElementById('kSlider').addEventListener('input',function(e){k=+e.target.value;render();});
+  document.getElementById('dSlider').addEventListener('input',function(e){d=+e.target.value;render();});
+  render();
+})();
+</script>
+</body>
+</html>

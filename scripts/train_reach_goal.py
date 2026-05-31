@@ -44,6 +44,9 @@ def run_train(config) -> None:
     # ECC trains per-interpretation nets on a 2-objective [task, help] weight, so it
     # must be evaluated on each interpretation's projection rather than the raw reward.
     use_ecc = general_config.get("use_ecc", agent_config.get("algorithm") == "ecc_envelope")
+    # GPI-PD takes ref_point in train() (not __init__) and has a different train()
+    # signature than Envelope, so the ref_point/train wiring below branches on it.
+    use_gpipd = agent_config.get("algorithm") == "gpi_pd" or agent_config.get("algorithm") == "ecc_gpi_pd"
 
     print( f"[train] total_timesteps={train_config.get('total_timesteps')}")
     env_ = make_env(env_config.copy())
@@ -58,7 +61,11 @@ def run_train(config) -> None:
         ],
         dtype=np.float32,
     )
-    agent_config["ref_point"] = ref_point
+    # Envelope/ECC consume ref_point in __init__; GPI-PD takes it in train() instead.
+    if use_gpipd:
+        train_config["ref_point"] = ref_point
+    else:
+        agent_config["ref_point"] = ref_point
 
     agent = make_agent(env=env_, agent_config=agent_config)
 
@@ -79,7 +86,9 @@ def run_train(config) -> None:
 
     # Snapshot the agent implementation to W&B's Code tab for this run, so the run
     # records exactly which learner source produced it.
-    if getattr(agent, "log", False) and wandb.run is not None:
+    # GPI-PD's source lives in site-packages (morl_baselines), not this repo, so there
+    # is nothing under root="." to snapshot for it.
+    if not use_gpipd:
         agent_src = "agent/ecc_envelope.py" if use_ecc else "agent/envelope.py"
         wandb.run.log_code(
             root=".",
@@ -111,8 +120,14 @@ def run_train(config) -> None:
         # The ECC policy is conditioned on a 2-objective [task, help] weight, so it
         # is evaluated on each ethical interpretation's 2-objective projection of the
         # reward rather than on the raw multi-interpretation env reward.
+        # One-hot interpretation weight per interpretation (row 0 = deontological,
+        # row 1 = utilitarian), so a weight-conditioned agent (e.g. ecc_gpi_pd) is
+        # queried at the interpretation it is being evaluated on.
+        interp_weights = {"deontological": [1.0, 0.0], "utilitarian": [0.0, 1.0]}
         for interp in ("deontological", "utilitarian"):
             interp_env = make_env({**env_config, f"{interp}_wrapper": True})
+            if hasattr(agent, "set_eval_interp_weight"):
+                agent.set_eval_interp_weight(interp_weights[interp])
             eval_agent(
                 interp_env, agent, out_dir, label=interp, **eval_config, **env_config
             )

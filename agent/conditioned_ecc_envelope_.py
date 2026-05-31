@@ -1,5 +1,6 @@
 """Envelope Q-Learning implementation."""
 
+
 import os
 from pathlib import Path
 import time
@@ -68,35 +69,38 @@ def random_weights(
 class QNet(nn.Module):
     """Multi-objective Q-Network conditioned on the weight vector."""
 
-    def __init__(self, obs_shape, action_dim, rew_dim, net_arch):
+    def __init__(self, obs_shape, action_dim, rew_dim, num_interps, net_arch):
         """Initialize the Q network.
 
         Args:
             obs_shape: shape of the observation
             action_dim: number of actions
             rew_dim: number of objectives
+            num_interps: number of interpretations
             net_arch: network architecture (number of units per layer)
         """
         super().__init__()
         self.obs_shape = obs_shape
         self.action_dim = action_dim
         self.rew_dim = rew_dim
+        self.num_interps = num_interps
         if len(obs_shape) == 1:
             self.feature_extractor = None
-            input_dim = obs_shape[0] + rew_dim
+            input_dim = obs_shape[0] + rew_dim + num_interps
         elif len(obs_shape) > 1:  # Image observation
             self.feature_extractor = NatureCNN(self.obs_shape, features_dim=512)
-            input_dim = self.feature_extractor.features_dim + rew_dim
+            input_dim = self.feature_extractor.features_dim + rew_dim + num_interps
         # |S| + |R| -> ... -> |A| * |R|
         self.net = mlp(input_dim, action_dim * rew_dim, net_arch)
         self.apply(layer_init)
 
-    def forward(self, obs, w):
+    def forward(self, obs, w, interp_w):
         """Predict Q values for all actions.
 
         Args:
             obs: current observation
             w: weight vector
+            interp_w: interpretation weights
 
         Returns: the Q values for all actions
 
@@ -105,7 +109,9 @@ class QNet(nn.Module):
             features = self.feature_extractor(obs)
             if w.dim() == 1:
                 w = w.unsqueeze(0)
-            input = th.cat((features, w), dim=features.dim() - 1)
+            if interp_w.dim() == 1:
+                interp_w = interp_w.unsqueeze(0)
+            input = th.cat((features, w, interp_w), dim=features.dim() - 1)
         else:
             if w.dim() == 1:
                 w = w.unsqueeze(0)
@@ -118,18 +124,7 @@ class QNet(nn.Module):
         )  # Batch size X Actions X Rewards
 
 
-class QNetEnsemble(nn.ModuleList):
-    """A list of Q-networks callable to infer over all of them at once."""
-
-    def forward(self, obs, w):
-        """Run every Q-net and stack the results.
-
-        Returns: a tensor of shape [num_interps, ...] with the stacked Q-values.
-        """
-        return th.stack([q_net(obs, w) for q_net in self])
-
-
-class ECCEnvelope(MOPolicy, MOAgent):
+class ConditionedEnvelope(MOPolicy, MOAgent):
     """Envelope Q-Leaning Algorithm.
 
     Envelope uses a conditioned network to embed multiple policies (taking the weight as input).
@@ -172,15 +167,8 @@ class ECCEnvelope(MOPolicy, MOAgent):
         ref_point: np.ndarray = np.array([-100.0, -100.0]),
         dirichlet_alpha: float = 0.8,
         num_interps: int = 2,
-        interp_weight: np.ndarray = np.array([0.5, 0.5]),
-        ucb_beta: float = 1.0,
-        ucb_n_candidates: int = 50,
-        ucb_neighbor_dist: float = 0.2,
-        ucb_window: int = 200,
-        ucb_warmup_episodes: int = 100,
-        ucb_epsilon: float = 0.2,
     ):
-        """Envelope Q-learning algorithm.
+        """Interpretation conditioned Envelope Q-learning algorithm.
 
         Args:
             env: The environment to learn from.
@@ -237,95 +225,48 @@ class ECCEnvelope(MOPolicy, MOAgent):
         self.use_hv = use_hv
         self.ref_point = ref_point
         self.dirichlet_alpha = dirichlet_alpha
-        self.num_interps = num_interps
-        self.interp_weight = interp_weight  # default / eval interp weight
-        self.ucb_beta = ucb_beta
-        self.ucb_n_candidates = ucb_n_candidates
-        self.ucb_neighbor_dist = ucb_neighbor_dist
-        self.ucb_window = ucb_window
-        self.ucb_warmup_episodes = ucb_warmup_episodes
-        self.ucb_epsilon = ucb_epsilon
-
-        # The env emits a flattened per-interpretation reward matrix as a single
-        # vector of length num_interps * net_reward_dim, laid out row-major (one
-        # row per interpretation, each row a self-contained objective vector
-        # [shared/task, ...]). The agent reshapes it back into rows and trains
-        # network i on row i.
-        self.flat_reward_dim = self.reward_dim  # reward_space.shape[0]
-        assert self.flat_reward_dim % self.num_interps == 0, (
-            f"reward_dim={self.flat_reward_dim} is not divisible by "
-            f"num_interps={self.num_interps}."
-        )
-        assert len(self.interp_weight) == self.num_interps, (
-            f"interp_weight has length {len(self.interp_weight)} but "
-            f"num_interps={self.num_interps}."
-        )
-        self.net_reward_dim = self.flat_reward_dim // self.num_interps
-
-        self.q_nets = QNetEnsemble()
-        self.target_q_nets = QNetEnsemble()
 
         if len(self.observation_shape) == 1:
-            for i in range(num_interps):
-                self.q_nets.append(
-                    QNet(
-                        self.observation_shape,
-                        self.action_dim,
-                        self.net_reward_dim,
-                        net_arch=net_arch,
-                    ).to(self.device)
-                )
-                self.target_q_nets.append(
-                    QNet(
-                        self.observation_shape,
-                        self.action_dim,
-                        self.net_reward_dim,
-                        net_arch=net_arch,
-                    ).to(self.device)
-                )
+            self.q_net = QNet(
+                self.observation_shape,
+                self.action_dim,
+                self.reward_dim,
+                net_arch=net_arch,
+            ).to(self.device)
+            self.target_q_net = QNet(
+                self.observation_shape,
+                self.action_dim,
+                self.reward_dim,
+                net_arch=net_arch,
+            ).to(self.device)
         elif len(self.observation_shape) > 1:  # use CNNQNet
-            self.q_nets.append(
-                CNNQNet(
-                    self.observation_shape,
-                    self.action_dim,
-                    self.net_reward_dim,
-                    net_arch=net_arch,
-                    cnn_config=cnn_config,
-                ).to(self.device)
-            )
-            self.target_q_nets.append(
-                CNNQNet(
-                    self.observation_shape,
-                    self.action_dim,
-                    self.net_reward_dim,
-                    net_arch=net_arch,
-                    cnn_config=cnn_config,
-                ).to(self.device)
-            )
+            self.q_net = CNNQNet(
+                self.observation_shape,
+                self.action_dim,
+                self.reward_dim,
+                net_arch=net_arch,
+                cnn_config=cnn_config,
+            ).to(self.device)
+            self.target_q_net = CNNQNet(
+                self.observation_shape,
+                self.action_dim,
+                self.reward_dim,
+                net_arch=net_arch,
+                cnn_config=cnn_config,
+            ).to(self.device)
 
-        for q_net, target_q_net in zip(self.q_nets, self.target_q_nets):
-            target_q_net.load_state_dict(q_net.state_dict())
-            for param in target_q_net.parameters():
-                param.requires_grad = False
+        self.target_q_net.load_state_dict(self.q_net.state_dict())
+        for param in self.target_q_net.parameters():
+            param.requires_grad = False
 
-        self.q_optim = optim.Adam(self.q_nets.parameters(), lr=self.learning_rate)
+        self.q_optim = optim.Adam(self.q_net.parameters(), lr=self.learning_rate)
 
         self.envelope = envelope
         self.num_sample_w = num_sample_w
         self.homotopy_lambda = self.initial_homotopy_lambda
         self._episode_rewards: deque = deque(maxlen=100)
         self._episode_lengths: deque = deque(maxlen=100)
-        self._episode_mo_returns: List[np.ndarray] = (
-            []
-        )  # combined (agent-space) MO returns
-        # Per-interpretation fronts for sum-of-HV UCB signal.
-        self._episode_mo_returns_per_interp: List[List[np.ndarray]] = [
-            [] for _ in range(self.num_interps)
-        ]
-        # Sliding window of (joint_key, normalised_marginal_hv) where
-        # joint_key = concat(w, interp_weight).
-        self._weight_hv_history: deque = deque(maxlen=self.ucb_window)
-        # Current episode's interp weight (set at reset, used by max_action / get_q_sets).
+        self._episode_mo_returns: List[np.ndarray] = []  # all MO returns seen so far
         self._n_updates: int = 0
         self._last_loss: float = float("nan")
         self._start_time: float = 0.0
@@ -333,7 +274,7 @@ class ECCEnvelope(MOPolicy, MOAgent):
             self.replay_buffer = PrioritizedReplayBuffer(
                 self.observation_shape,
                 1,
-                rew_dim=self.flat_reward_dim,
+                rew_dim=self.reward_dim,
                 max_size=buffer_size,
                 action_dtype=np.uint8,
             )
@@ -341,7 +282,7 @@ class ECCEnvelope(MOPolicy, MOAgent):
             self.replay_buffer = ReplayBuffer(
                 self.observation_shape,
                 1,
-                rew_dim=self.flat_reward_dim,
+                rew_dim=self.reward_dim,
                 max_size=buffer_size,
                 action_dtype=np.uint8,
             )
@@ -391,7 +332,8 @@ class ECCEnvelope(MOPolicy, MOAgent):
         if not os.path.isdir(save_dir):
             os.makedirs(save_dir)
         saved_params = {}
-        saved_params["q_nets_state_dict"] = self.q_nets.state_dict()
+        saved_params["q_net_state_dict"] = self.q_net.state_dict()
+
         saved_params["q_net_optimizer_state_dict"] = self.q_optim.state_dict()
         if save_replay_buffer:
             saved_params["replay_buffer"] = self.replay_buffer
@@ -406,8 +348,8 @@ class ECCEnvelope(MOPolicy, MOAgent):
             load_replay_buffer: Whether to load the replay buffer too.
         """
         params = th.load(path, weights_only=False)
-        self.q_nets.load_state_dict(params["q_nets_state_dict"])
-        self.target_q_nets.load_state_dict(params["q_nets_state_dict"])
+        self.q_net.load_state_dict(params["q_net_state_dict"])
+        self.target_q_net.load_state_dict(params["q_net_state_dict"])
         self.q_optim.load_state_dict(params["q_net_optimizer_state_dict"])
         if load_replay_buffer and "replay_buffer" in params:
             self.replay_buffer = params["replay_buffer"]
@@ -416,56 +358,6 @@ class ECCEnvelope(MOPolicy, MOAgent):
         return self.replay_buffer.sample(
             self.batch_size, to_tensor=True, device=self.device
         )
-
-    def _to_agent_objective(self, reward, interp_w) -> np.ndarray:
-        """Project an env reward matrix into the agent's net-objective space.
-
-        The env reward is a matrix [num_interps, net_reward_dim] (one row per
-        interpretation). The agent reasons in a single net_reward_dim objective
-        space, collapsing the interpretation rows via a weighted average with
-        ``self.interp_weight`` (the same weighting used to scalarize the per-interp
-        Q-nets). Used for logging/eval, which run against net_reward_dim weights.
-        (Training itself keeps the interpretations separate per net.)
-
-        Args:
-            reward: an env reward matrix of shape [num_interps, net_reward_dim],
-                or its flattened form.
-
-        Returns: an array of shape [net_reward_dim].
-        """
-        reward = np.asarray(reward, dtype=float).reshape(
-            self.num_interps, self.net_reward_dim
-        )
-        return np.asarray(interp_w, dtype=float) @ reward
-
-    @th.no_grad()
-    def _eval_front_point(
-        self, eval_env: gym.Env, w: np.ndarray, rep: int, interp_w: np.ndarray
-    ) -> np.ndarray:
-        """Evaluate the greedy policy under net-objective weight ``w``.
-
-        The env hands back a reward matrix; the standard ``eval_mo`` would try to
-        accumulate it against the (net_reward_dim,) weight and break. Here we act
-        with the net weight but accumulate the env reward projected into the agent's
-        net-objective space via ``_to_agent_objective``, averaging the discounted
-        return over ``rep`` episodes. Returns a [net_reward_dim] Pareto-front point.
-        """
-        disc_returns = []
-        for _ in range(rep):
-            obs, _ = eval_env.reset()
-            done = False
-            disc_return = np.zeros(self.net_reward_dim, dtype=np.float32)
-            gamma = 1.0
-            while not done:
-                action = self.eval(obs, w, interp_w)
-                obs, reward, terminated, truncated, _ = eval_env.step(action)
-                done = terminated or truncated
-                disc_return += gamma * self._to_agent_objective(reward, interp_w).astype(
-                    np.float32
-                )
-                gamma *= self.gamma
-            disc_returns.append(disc_return)
-        return np.mean(disc_returns, axis=0)
 
     @override
     def update(self, fixed_w: Optional[np.ndarray] = None):
@@ -495,7 +387,7 @@ class ECCEnvelope(MOPolicy, MOAgent):
                 sampled_w = (
                     th.tensor(
                         random_weights(
-                            self.net_reward_dim,
+                            self.reward_dim,
                             self.num_sample_w,
                             dist="dirichlet",
                             rng=self.np_random,
@@ -518,37 +410,27 @@ class ECCEnvelope(MOPolicy, MOAgent):
                 b_dones.repeat(self.num_sample_w, 1),
             )
 
-            # the buffer stores the flattened env reward matrix; unflatten it back
-            # into per-interpretation rows so net i is trained on row i.
-            b_rewards_per_net = b_rewards.view(
-                b_rewards.size(0), self.num_interps, self.net_reward_dim
-            ).permute(
-                1, 0, 2
-            )  # [num_interps, N, net_reward_dim]
-
-            # update each q net separately
             with th.no_grad():
                 if self.envelope:
-                    targets = self.envelope_target(b_next_obs, w, sampled_w)
+                    target = self.envelope_target(b_next_obs, w, sampled_w)
                 else:
-                    targets = self.ddqn_target(b_next_obs, w)
-                target_q = b_rewards_per_net + (1 - b_dones) * self.gamma * targets
+                    target = self.ddqn_target(b_next_obs, w)
+                target_q = b_rewards + (1 - b_dones) * self.gamma * target
 
-            q_values = self.q_nets(b_obs, w)  # [num_interps, N, action_dim, reward_dim]
+            q_values = self.q_net(b_obs, w)
             q_value = q_values.gather(
-                2,
+                1,
                 b_actions.long()
-                .reshape(1, -1, 1, 1)
-                .expand(q_values.size(0), q_values.size(1), 1, q_values.size(3)),
-            ).squeeze(
-                2
-            )  # [num_interps, N, reward_dim]
+                .reshape(-1, 1, 1)
+                .expand(q_values.size(0), 1, q_values.size(2)),
+            )
+            q_value = q_value.reshape(-1, self.reward_dim)
 
             critic_loss = F.mse_loss(q_value, target_q)
 
             if self.homotopy_lambda > 0:
-                wQ = th.einsum("inr,nr->in", q_value, w)
-                wTQ = th.einsum("inr,nr->in", target_q, w)
+                wQ = th.einsum("br,br->b", q_value, w)
+                wTQ = th.einsum("br,br->b", target_q, w)
                 auxiliary_loss = F.mse_loss(wQ, wTQ)
                 critic_loss = (
                     1 - self.homotopy_lambda
@@ -560,25 +442,19 @@ class ECCEnvelope(MOPolicy, MOAgent):
                 wandb.log(
                     {
                         "losses/grad_norm": get_grad_norm(
-                            self.q_nets.parameters()
+                            self.q_net.parameters()
                         ).item(),
                         "global_step": self.global_step,
                     },
                 )
             if self.max_grad_norm is not None:
-                th.nn.utils.clip_grad_norm_(
-                    self.q_nets.parameters(), self.max_grad_norm
-                )
+                th.nn.utils.clip_grad_norm_(self.q_net.parameters(), self.max_grad_norm)
             self.q_optim.step()
             critic_losses.append(critic_loss.item())
 
             if self.per:
-                td_err = (
-                    q_value[:, : len(b_inds)] - target_q[:, : len(b_inds)]
-                ).detach()  # [num_interps, b_inds, reward_dim]
-                priority = th.einsum("isr,sr->is", td_err, w[: len(b_inds)]).abs()
-                # average the priority across the q-nets
-                priority = priority.mean(dim=0)
+                td_err = (q_value[: len(b_inds)] - target_q[: len(b_inds)]).detach()
+                priority = th.einsum("sr,sr->s", td_err, w[: len(b_inds)]).abs()
                 priority = priority.cpu().numpy().flatten()
                 priority = (
                     priority + self.replay_buffer.min_priority
@@ -587,7 +463,7 @@ class ECCEnvelope(MOPolicy, MOAgent):
 
         if self.tau != 1 or self.global_step % self.target_net_update_freq == 0:
             polyak_update(
-                self.q_nets.parameters(), self.target_q_nets.parameters(), self.tau
+                self.q_net.parameters(), self.target_q_net.parameters(), self.tau
             )
 
         if self.epsilon_decay_steps is not None:
@@ -654,33 +530,33 @@ class ECCEnvelope(MOPolicy, MOAgent):
         print(sep)
 
     @override
-    def eval(self, obs: np.ndarray, w: np.ndarray, interp_w: np.ndarray) -> int:
+    def eval(self, obs: np.ndarray, w: np.ndarray) -> int:
         obs = th.as_tensor(obs).float().to(self.device)
         w = th.as_tensor(w).float().to(self.device)
-        interp_w = th.as_tensor(interp_w).float().to(self.device)
-        return self.max_action(obs, w, interp_w)
+        return self.max_action(obs, w)
 
-    def act(self, obs: th.Tensor, w: th.Tensor, interp_w: th.Tensor) -> int:
+    def act(self, obs: th.Tensor, w: th.Tensor) -> int:
         """Epsilon-greedily select an action given an observation and weight.
 
         Args:
             obs: observation
             w: weight vector
-            interp_w: interpretation weight vector
 
         Returns: an integer representing the action to take.
         """
         if self.np_random.random() < self.epsilon:
             return self.env.action_space.sample()
         else:
-            return self.max_action(obs, w, interp_w)
+            # if self.use_hv:
+            #     return self.hv_max_action(obs)
+            # else:
+            return self.max_action(obs, w)
 
-    def get_q_sets(self, obs, interp_w):
+    def get_q_sets(self, obs):
         """Compute the Q-set for a given observation, for all actions.
 
         Args:
             obs: current observation (array or tensor)
-            interp_w: interpretation weight vector
 
         Returns:
             A set of non-dominated Q vectors (tuples).
@@ -688,7 +564,7 @@ class ECCEnvelope(MOPolicy, MOAgent):
         sampled_w = (
             th.tensor(
                 random_weights(
-                    self.net_reward_dim,
+                    self.reward_dim,
                     self.num_sample_w,
                     dist="dirichlet",
                     rng=self.np_random,
@@ -699,29 +575,18 @@ class ECCEnvelope(MOPolicy, MOAgent):
             .to(self.device)
         )
         obs_per_weight = th.stack([obs] * self.num_sample_w)
-        q_set = self.q_nets(
-            obs_per_weight, sampled_w
-        )  # [num_interps, K, action_dim, reward_dim]
-        # scalarize between interps with the current episode's interp weight
-        q_set = th.einsum(
-            "i,ikar->kar",
-            th.tensor(interp_w).float().to(self.device),
-            q_set,
-        )  # [K, action_dim, reward_dim]
+        q_set = self.q_net(obs_per_weight, sampled_w)  # [K, action_dim, reward_dim]
         return q_set
 
-    def score_hypervolume(self, obs: th.Tensor, interp_w: th.Tensor) -> np.ndarray:
+    def score_hypervolume(self, obs: th.Tensor) -> np.ndarray:
         """Compute the action scores based upon the hypervolume metric.
 
         Args:
             obs: current observation.
-            interp_w: interpretation weight vector.
 
         Returns: a score per action (shape: [action_dim]).
         """
-        q_sets = (
-            self.get_q_sets(obs, interp_w).cpu().numpy()
-        )  # [K, action_dim, reward_dim]
+        q_sets = self.get_q_sets(obs).cpu().numpy()  # [K, action_dim, reward_dim]
         scores = np.array(
             [
                 hypervolume(
@@ -733,105 +598,47 @@ class ECCEnvelope(MOPolicy, MOAgent):
         )
         return scores
 
-
-    def _marginal_hv_sum(self) -> float:
-        """Sum of marginal HV contributions across all interpretations.
-
-        Each interpretation maintains its own Pareto front over [task, help_i].
-        An episode that expands either front contributes positively.  Call this
-        *after* appending to ``_episode_mo_returns_per_interp``.
+    @th.no_grad()
+    def hv_max_action(self, obs: th.Tensor) -> int:
         """
-        total_marginal = 0.0
-        total_current = 0.0
-        for returns in self._episode_mo_returns_per_interp:
-            if len(returns) == 0:
-                continue
-            front_with = list(get_non_dominated({tuple(r) for r in returns}))
-            hv_with = hypervolume(self.ref_point, front_with)
-            total_current += hv_with
-            if len(returns) > 1:
-                front_without = list(
-                    get_non_dominated({tuple(r) for r in returns[:-1]})
+        Select the action with the highest hypervolume contribution given an observation.
+        """
+        return int(np.argmax(self.score_hypervolume(obs)))
+
+    @th.no_grad()
+    def hv_best_weight(self, obs: th.Tensor) -> np.ndarray:
+        """Select the weight whose greedy action has the highest hypervolume contribution."""
+        sampled_w = (
+            th.tensor(
+                random_weights(
+                    self.reward_dim,
+                    self.num_sample_w,
+                    dist="dirichlet",
+                    rng=self.np_random,
+                    alpha=1.0,
                 )
-                hv_without = hypervolume(self.ref_point, front_without)
-            else:
-                hv_without = 0.0
-            total_marginal += hv_with - hv_without
-        normalised = total_marginal / total_current if total_current > 0 else 1.0
-        return float(normalised), float(total_current)
-
-    def ucb_best_weight_and_interp(self) -> tuple:
-        """UCB-style joint selection of objective weight and interpretation weight.
-
-        The UCB key for each episode is concat(w, interp_weight), a point in
-        simplex(net_reward_dim) × simplex(num_interps).  The signal is the
-        sum of normalised marginal HV contributions across all interpretations,
-        so the agent is directed toward (w, interp_w) pairs that have recently
-        expanded the most front area across all ethical perspectives.
-
-        Returns: (w, interp_weight) as numpy arrays.
-        """
-        n_episodes = len(self._weight_hv_history)
-
-        # Warmup: pure random until every joint region has been seeded.
-        if n_episodes < self.ucb_warmup_episodes:
-            return (
-                random_weights(
-                    self.net_reward_dim, 1, dist="dirichlet", rng=self.np_random
-                ),
-                random_weights(
-                    self.num_interps, 1, dist="dirichlet", rng=self.np_random
-                ),
             )
-
-        # ε-greedy: keep probing randomly after warmup.
-        if self.np_random.random() < self.ucb_epsilon:
-            return (
-                random_weights(
-                    self.net_reward_dim, 1, dist="dirichlet", rng=self.np_random
-                ),
-                random_weights(
-                    self.num_interps, 1, dist="dirichlet", rng=self.np_random
-                ),
-            )
-
-        # Sample candidate pairs from the joint simplex.
-        cand_w = random_weights(
-            self.net_reward_dim,
-            self.ucb_n_candidates,
-            dist="dirichlet",
-            rng=self.np_random,
+            .float()
+            .to(self.device)
         )
-        cand_iw = random_weights(
-            self.num_interps,
-            self.ucb_n_candidates,
-            dist="dirichlet",
-            rng=self.np_random,
+        obs = th.tensor(obs).float().to(self.device)
+        obs_per_weight = th.stack([obs] * self.num_sample_w)
+        q_set = self.q_net(obs_per_weight, sampled_w)  # [K, action_dim, reward_dim]
+        hv_contributions = np.array(
+            [
+                hypervolume(
+                    self.ref_point,
+                    list(
+                        get_non_dominated(
+                            set(map(tuple, q_set[k].cpu().numpy().tolist()))
+                        )
+                    ),
+                )
+                for k in range(self.num_sample_w)
+            ]
         )
-        cand_keys = np.concatenate(
-            [cand_w, cand_iw], axis=1
-        )  # [C, net_reward_dim + num_interps]
-
-        past_keys = np.array([k for k, _ in self._weight_hv_history])
-        past_hvs = np.array([h for _, h in self._weight_hv_history])
-        N_total = len(self._weight_hv_history)
-
-        ucb_scores = np.full(self.ucb_n_candidates, np.inf)
-        for i, key in enumerate(cand_keys):
-            dists = np.abs(past_keys - key).sum(axis=1)
-            nearby = past_hvs[dists < self.ucb_neighbor_dist]
-            if len(nearby) == 0:
-                continue  # stays inf → explored first
-            n = len(nearby)
-            ucb_scores[i] = nearby.mean() + self.ucb_beta * np.sqrt(np.log(N_total) / n)
-
-        unexplored = np.where(np.isinf(ucb_scores))[0]
-        if len(unexplored) > 0:
-            best = self.np_random.choice(unexplored)
-        else:
-            best = int(np.argmax(ucb_scores))
-
-        return cand_w[best], cand_iw[best]
+        best_k = int(np.argmin(hv_contributions))
+        return sampled_w[best_k].cpu().numpy()
 
     # def hv_weight_action(self, obs: th.Tensor, sampled_w: np.ndarray) -> int:
     #     """Pick the weight that contributes most to HV, then act greedily under it."""
@@ -850,29 +657,17 @@ class ECCEnvelope(MOPolicy, MOAgent):
     #     return int(best_actions[best_k])
 
     @th.no_grad()
-    def max_action(
-        self, obs: th.Tensor, w: th.Tensor, interp_w: th.Tensor
-    ) -> int:
+    def max_action(self, obs: th.Tensor, w: th.Tensor) -> int:
         """Select the action with the highest Q-value given an observation and weight.
 
         Args:
             obs: observation
             w: weight vector
-            interp_w: interpretation weight vector
 
         Returns: the action with the highest Q-value.
         """
-        q_values = self.q_nets(obs, w)  # [num_interps, B, action_dim, reward_dim]
-        # scalarize over objectives with w
-        scalarized_q_values = th.einsum(
-            "r,ibar->iba", w, q_values
-        )  # [num_interps, B, action_dim]
-        # scalarize between interps with the current episode's interp weight
-        scalarized_q_values = th.einsum(
-            "i,iba->ba",
-            th.tensor(interp_w).float().to(self.device),
-            scalarized_q_values,
-        )  # [B, action_dim]
+        q_values = self.q_net(obs, w)
+        scalarized_q_values = th.einsum("r,bar->ba", w, q_values)
         max_act = th.argmax(scalarized_q_values, dim=1)
         return max_act.detach().item()
 
@@ -893,51 +688,36 @@ class ECCEnvelope(MOPolicy, MOAgent):
         W = sampled_w.repeat(obs.size(0), 1)
         # Repeat the observations for each sampled weight
         next_obs = obs.repeat_interleave(sampled_w.size(0), 0)
-        # Num interps X Batch size X Num sampled weights X Num actions X Num objectives
-        next_q_values = self.q_nets(next_obs, W).view(
-            self.num_interps,
-            obs.size(0),
-            sampled_w.size(0),
-            self.action_dim,
-            self.net_reward_dim,
+        # Batch size X Num sampled weights X Num actions X Num objectives
+        next_q_values = self.q_net(next_obs, W).view(
+            obs.size(0), sampled_w.size(0), self.action_dim, self.reward_dim
         )
         # Scalarized Q values for each sampled weight
-        scalarized_next_q_values = th.einsum("br,ibwar->ibwa", w, next_q_values)
+        scalarized_next_q_values = th.einsum("br,bwar->bwa", w, next_q_values)
         # Max Q values for each sampled weight
-        max_q, ac = th.max(scalarized_next_q_values, dim=3)
+        max_q, ac = th.max(scalarized_next_q_values, dim=2)
         # Max weights in the envelope
-        pref = th.argmax(max_q, dim=2)
+        pref = th.argmax(max_q, dim=1)
 
-        # MO Q-values evaluated on the target networks
-        next_q_values_target = self.target_q_nets(next_obs, W).view(
-            self.num_interps,
-            obs.size(0),
-            sampled_w.size(0),
-            self.action_dim,
-            self.net_reward_dim,
+        # MO Q-values evaluated on the target network
+        next_q_values_target = self.target_q_net(next_obs, W).view(
+            obs.size(0), sampled_w.size(0), self.action_dim, self.reward_dim
         )
 
         # Index the Q-values for the max actions
         max_next_q = next_q_values_target.gather(
-            3,
-            ac.unsqueeze(3)
-            .unsqueeze(4)
-            .expand(
-                next_q_values.size(0),
-                next_q_values.size(1),
-                next_q_values.size(2),
-                1,
-                next_q_values.size(4),
-            ),
-        ).squeeze(3)
-        # Index the Q-values for the max sampled weights
-        max_next_q = max_next_q.gather(
             2,
-            pref.reshape(self.num_interps, -1, 1, 1).expand(
-                max_next_q.size(0), max_next_q.size(1), 1, max_next_q.size(3)
+            ac.unsqueeze(2)
+            .unsqueeze(3)
+            .expand(
+                next_q_values.size(0), next_q_values.size(1), 1, next_q_values.size(3)
             ),
         ).squeeze(2)
-        return max_next_q  # [num_interps, N, reward_dim]
+        # Index the Q-values for the max sampled weights
+        max_next_q = max_next_q.gather(
+            1, pref.reshape(-1, 1, 1).expand(max_next_q.size(0), 1, max_next_q.size(2))
+        ).squeeze(1)
+        return max_next_q
 
     @th.no_grad()
     def ddqn_target(self, obs: th.Tensor, w: th.Tensor) -> th.Tensor:
@@ -949,26 +729,20 @@ class ECCEnvelope(MOPolicy, MOAgent):
 
         Returns: the DQN target.
         """
-        # Max action for each state, per q-net
-        q_values = self.q_nets(obs, w)  # [num_interps, N, action_dim, reward_dim]
-        scalarized_q_values = th.einsum("br,ibar->iba", w, q_values)
-        max_acts = th.argmax(scalarized_q_values, dim=2)  # [num_interps, N]
-        # Action evaluated with the target networks
-        q_values_target = self.target_q_nets(
-            obs, w
-        )  # [num_interps, N, action_dim, reward_dim]
+        # Max action for each state
+        q_values = self.q_net(obs, w)
+        scalarized_q_values = th.einsum("br,bar->ba", w, q_values)
+        max_acts = th.argmax(scalarized_q_values, dim=1)
+        # Action evaluated with the target network
+        q_values_target = self.target_q_net(obs, w)
         q_values_target = q_values_target.gather(
-            2,
+            1,
             max_acts.long()
-            .reshape(q_values_target.size(0), -1, 1, 1)
-            .expand(
-                q_values_target.size(0),
-                q_values_target.size(1),
-                1,
-                q_values_target.size(3),
-            ),
-        ).squeeze(2)
-        return q_values_target  # [num_interps, N, reward_dim]
+            .reshape(-1, 1, 1)
+            .expand(q_values_target.size(0), 1, q_values_target.size(2)),
+        )
+        q_values_target = q_values_target.reshape(-1, self.reward_dim)
+        return q_values_target
 
     def train(
         self,
@@ -1034,28 +808,24 @@ class ECCEnvelope(MOPolicy, MOAgent):
 
         num_episodes = 0
         eval_weights = equally_spaced_weights(
-            self.net_reward_dim, n=num_eval_weights_for_front
+            self.reward_dim, n=num_eval_weights_for_front
         )
         obs, _ = self.env.reset()
 
         if weight is not None:
-            # train on a single weight and interp weight
             w = np.array(weight)
-            iw = np.array(self.interp_weight, dtype=np.float32)
         elif self.use_hv:
-            w, iw = self.ucb_best_weight_and_interp()
+            w = self.hv_best_weight(obs)
         else:
             w = random_weights(
-                self.net_reward_dim,
+                self.reward_dim,
                 1,
                 dist="dirichlet",
                 rng=self.np_random,
                 alpha=self.dirichlet_alpha,
             )
-            iw = np.array(self.interp_weight, dtype=np.float32)
 
         tensor_w = th.tensor(w).float().to(self.device)
-        tensor_iw = th.tensor(iw).float().to(self.device)
 
         for _ in range(1, total_timesteps + 1):
             # checkpoint: save model
@@ -1067,7 +837,7 @@ class ECCEnvelope(MOPolicy, MOAgent):
             if self.global_step < self.learning_starts:
                 action = self.env.action_space.sample()
             else:
-                action = self.act(th.as_tensor(obs).float().to(self.device), tensor_w, tensor_iw)
+                action = self.act(th.as_tensor(obs).float().to(self.device), tensor_w)
 
             next_obs, vec_reward, terminated, truncated, info = self.env.step(action)
             self.global_step += 1
@@ -1080,13 +850,18 @@ class ECCEnvelope(MOPolicy, MOAgent):
 
             if eval_env is not None and self.log and self.global_step % eval_freq == 0:
                 current_front = [
-                    self._eval_front_point(eval_env, ew, num_eval_episodes_for_front, self.interp_weight)
+                    self.policy_eval(
+                        eval_env,
+                        weights=ew,
+                        num_episodes=num_eval_episodes_for_front,
+                        log=self.log,
+                    )[3]
                     for ew in eval_weights
                 ]
                 log_all_multi_policy_metrics(
                     current_front=current_front,
                     hv_ref_point=self.ref_point,
-                    reward_dim=self.net_reward_dim,
+                    reward_dim=self.reward_dim,
                     global_step=self.global_step,
                     n_sample_weights=num_eval_weights_for_eval,
                     ref_front=known_pareto_front,
@@ -1099,55 +874,26 @@ class ECCEnvelope(MOPolicy, MOAgent):
 
                 if "episode" in info.keys():
                     ep_info = info["episode"]
-                    # Reshape flat env return into per-interpretation rows.
-                    flat_return = np.array(ep_info["r"]).flatten()
-                    per_interp_return = flat_return.reshape(
-                        self.num_interps, self.net_reward_dim
-                    )
-                    for i in range(self.num_interps):
-                        self._episode_mo_returns_per_interp[i].append(
-                            per_interp_return[i].copy()
-                        )
-                    # Combined agent-space return (for logging / episode reward).
-                    mo_return = self._to_agent_objective(flat_return, iw)
+                    mo_return = np.array(ep_info["r"]).flatten()
                     self._episode_mo_returns.append(mo_return)
-                    # UCB signal: sum of normalised marginal HV across interpretations.
-                    normalised_hv, total_hv = self._marginal_hv_sum()
-                    joint_key = np.concatenate([w.flatten(), iw.flatten()])
-                    self._weight_hv_history.append((joint_key, normalised_hv))
                     ep_rew = np.dot(w.flatten(), mo_return)
                     self._episode_rewards.append(float(ep_rew))
                     self._episode_lengths.append(int(ep_info["l"]))
-                    if self.log and self.num_episodes % 10 == 0:
-                        wandb.log(
-                            {
-                                "ucb/normalised_hv_sum": normalised_hv,
-                                "ucb/total_hv_sum": total_hv,
-                                "ucb/history_size": len(self._weight_hv_history),
-                                "ucb/in_warmup": int(
-                                    len(self._weight_hv_history)
-                                    < self.ucb_warmup_episodes
-                                ),
-                                "global_step": self.global_step,
-                            }
-                        )
                     if verbose:
                         self._dump_logs()
 
                 if weight is None:
                     if self.use_hv:
-                        w, iw = self.ucb_best_weight_and_interp()
+                        w = self.hv_best_weight(obs)
                     else:
                         w = random_weights(
-                            self.net_reward_dim,
+                            self.reward_dim,
                             1,
                             dist="dirichlet",
                             rng=self.np_random,
                             alpha=self.dirichlet_alpha,
                         )
-                        iw = np.array(self.interp_weight, dtype=np.float32)
                     tensor_w = th.tensor(w).float().to(self.device)
-                    tensor_iw = th.tensor(iw).float().to(self.device)
 
             else:
                 obs = next_obs

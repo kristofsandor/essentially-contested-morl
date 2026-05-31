@@ -31,7 +31,6 @@ def wrapped_reward_space(env):
         e = getattr(e, "env", None)
     return env.unwrapped.reward_space
 
-
 def eval_agent(
     eval_env,
     agent,
@@ -45,39 +44,80 @@ def eval_agent(
     terminal_reward,
     proximity_reward,
     label="",
+    use_ecc=False,
     **__unused_kwargs,
 ) -> None:
-    suffix = f"_{label}" if label else ""
-    print(f"[train] evaluating at a sweep of weights{f' ({label})' if label else ''} ...")
+    if use_ecc:
+        ecc_weights = equally_spaced_weights(2, n=5)  # only for ECC, ignored by others
+        for ecc_weight in ecc_weights:
+            suffix = f"_{label}_{ecc_weight[0]}_{ecc_weight[1]}"
+            eval_agent_(
+                eval_env,
+                agent,
+                out_dir,
+                num_eval_weights,
+                num_eval_episodes,
+                max_episode_steps,
+                num_humans,
+                help_reward,
+                step_penalty,
+                terminal_reward,
+                proximity_reward,
+                label=suffix,
+                ecc_weight=ecc_weight,
+            )
+    else:
+        suffix = f"_{label}" if label else ""
+        eval_agent_(
+            eval_env,
+            agent,
+            out_dir,
+            num_eval_weights,
+            num_eval_episodes,
+            max_episode_steps,
+            num_humans,
+            help_reward,
+            step_penalty,
+            terminal_reward,
+            proximity_reward,
+            label=suffix,
+            ecc_weight=None,
+        )
 
+def eval_agent_(
+    eval_env,
+    agent,
+    out_dir,
+    num_eval_weights,
+    num_eval_episodes,
+    max_episode_steps,
+    num_humans,
+    help_reward,
+    step_penalty,
+    terminal_reward,
+    proximity_reward,
+    label="",
+    ecc_weight=None,
+    **__unused_kwargs,
+) -> None:
+    print(f"[train] evaluating at a sweep of weights{f' ({label})' if label else ''} ...")
     reward_dim = wrapped_reward_space(eval_env).shape[0]
     weights = equally_spaced_weights(reward_dim, n=num_eval_weights)
     eval_returns = []
     for w in weights:
-        ep_returns = []
-        for ep in range(num_eval_episodes):
-            obs, _ = eval_env.reset()
-            done = False
-            ret = np.zeros(reward_dim, dtype=np.float32)
-            while not done:
-                action = agent.eval(obs, np.asarray(w, dtype=np.float32))
-                obs, reward, terminated, truncated, _ = eval_env.step(int(action))
-
-                ret += reward
-                done = terminated or truncated
-            ep_returns.append(ret)
+        ep_returns = _eval(eval_env, agent, w, num_eval_episodes, reward_dim, interp_w=ecc_weight)
         eval_returns.append(np.mean(ep_returns, axis=0))
     eval_returns = np.stack(eval_returns)  # (num_weights, 2)
 
-    np.save(out_dir / f"eval_returns{suffix}.npy", eval_returns)
-    np.save(out_dir / f"eval_weights{suffix}.npy", np.asarray(weights, dtype=np.float32))
-    print(f"[train] saved raw returns to {out_dir / f'eval_returns{suffix}.npy'}")
+    np.save(out_dir / f"eval_returns{label}.npy", eval_returns)
+    np.save(out_dir / f"eval_weights{label}.npy", np.asarray(weights, dtype=np.float32))
+    print(f"[train] saved raw returns to {out_dir / f'eval_returns{label}.npy'}")
 
     plot_eval(
         data=eval_returns,
         weights=weights,
         out_dir=out_dir,
-        name=f"pareto_front{suffix}",
+        name=f"pareto_front{label}",
         max_episode_steps=max_episode_steps,
         num_humans=num_humans,
         help_reward=help_reward,
@@ -102,6 +142,24 @@ def eval_agent(
     #     terminal_reward=terminal_reward,
     #     proximity_reward=proximity_reward,
     # )
+
+def _eval(eval_env, agent, w,  num_eval_episodes, reward_dim, interp_w = None):
+        ep_returns = []
+        for ep in range(num_eval_episodes):
+            obs, _ = eval_env.reset()
+            done = False
+            ret = np.zeros(reward_dim, dtype=np.float32)
+            while not done:
+                if interp_w is not None:
+                    action = agent.eval(obs, np.asarray(w, dtype=np.float32), interp_w)
+                else:
+                    action = agent.eval(obs, np.asarray(w, dtype=np.float32))
+                obs, reward, terminated, truncated, _ = eval_env.step(int(action))
+
+                ret += reward
+                done = terminated or truncated
+            ep_returns.append(ret)
+        return ep_returns
 
 
 def plot_eval(

@@ -59,3 +59,24 @@ class MeanInterpWrapper(gym.RewardWrapper):
 
     def reward(self, reward):
         return _as_matrix(reward).mean(axis=0).astype(np.float32)
+
+
+class InterpWeightWrapper(gym.RewardWrapper):
+    """Project interpretations by a weighted average at a fixed interp weight.
+
+    reward -> [task, sum_i interp_w[i] * help_i] (column 0 is shared task).
+    Used to evaluate a weight-conditioned ECC agent at a reference interpretation
+    weight, so the env return lives in the agent's net_reward_dim objective space.
+    """
+
+    def __init__(self, env, interp_w):
+        super().__init__(env)
+        self.interp_w = np.asarray(interp_w, dtype=np.float32)
+        rs = env.unwrapped.reward_space
+        self.reward_space = gym.spaces.Box(
+            low=(self.interp_w @ _as_matrix(rs.low)).astype(np.float32),
+            high=(self.interp_w @ _as_matrix(rs.high)).astype(np.float32),
+        )
+
+    def reward(self, reward):
+        return (self.interp_w @ _as_matrix(reward)).astype(np.float32)

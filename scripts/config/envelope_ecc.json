@@ -17,8 +17,8 @@
         "utilitarian_wrapper": false
     },
     "train": {
-        "total_timesteps": 50000,
-        "eval_freq": 10000,
+        "total_timesteps": 400000,
+        "eval_freq": 20000,
         "num_eval_weights_for_front": 25,
         "num_eval_episodes_for_front": 5,
         "num_eval_weights_for_eval": 25,
@@ -28,7 +28,8 @@
     },
     "eval": {
         "num_eval_episodes": 50,
-        "num_eval_weights": 50
+        "num_eval_weights": 50,
+        "use_ecc": true
     },
     "agent": {
         "algorithm": "ecc_envelope",
@@ -42,7 +43,7 @@
             64
         ],
         "batch_size": 64,
-        "learning_starts": 500,
+        "learning_starts": 50,
         "gradient_updates": 1,
         "target_net_update_freq": 500,
         "envelope": false,
