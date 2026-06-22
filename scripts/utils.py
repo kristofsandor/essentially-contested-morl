@@ -3,16 +3,16 @@ import numpy as np
 from mo_gymnasium.wrappers.wrappers import MORecordEpisodeStatistics
 from morl_baselines.multi_policy.linear_support.linear_support import LinearSupport
 
+from agent.pql import PQL
 from agent.ecc_envelope import ECCEnvelope
 from agent.envelope import Envelope
-from agent.pql import PQL
 from agent.gpi_pd import GPIPD
 from agent.ecc_gpi_pd import ECCGPIPD
 
 from pathlib import Path
 
 from agent.ucb_envelope import UCBEnvelope
-from wrappers.matrix_to_vector import DeontologicalWrapper, UtilitarianWrapper
+from wrappers.matrix_to_vector import DeontologicalWrapper, InterpWeightWrapper, UtilitarianWrapper
 
 
 def _patch_linear_support_exact_arithmetic() -> None:
@@ -76,6 +76,41 @@ def _patch_linear_support_exact_arithmetic() -> None:
 _patch_linear_support_exact_arithmetic()
 
 
+def _patch_reward_dim_honors_wrappers() -> None:
+    """Size ``MOAgent.reward_dim`` from the outermost reward wrapper, not the raw env.
+
+    morl_baselines' ``extract_env_info`` reads ``env.unwrapped.reward_space``, which
+    bypasses our per-interpretation reward wrappers (Deontological/Utilitarian/
+    InterpWeight). A single-policy agent trained on a projected env would then be
+    sized to the raw multi-interpretation reward (e.g. the 4-D [task, deont_help,
+    task, util_help] matrix) but fed 2-D projected rewards, crashing on the first
+    replay-buffer add. Walk outward to the first wrapper that defines ``reward_space``
+    (the space the agent actually sees), mirroring ``eval_envelope.wrapped_reward_space``.
+    With no reward wrapper present the outermost space is the unwrapped one, so ECC /
+    raw-env training is unchanged.
+    """
+    from morl_baselines.common.morl_algorithm import MOAgent
+
+    _orig_extract = MOAgent.extract_env_info
+
+    def extract_env_info(self, env):
+        _orig_extract(self, env)
+        if env is None:
+            return
+        e = env
+        while e is not None:
+            rs = e.__dict__.get("reward_space")  # __dict__ avoids triggering proxies
+            if rs is not None:
+                self.reward_dim = rs.shape[0]
+                break
+            e = getattr(e, "env", None)
+
+    MOAgent.extract_env_info = extract_env_info
+
+
+_patch_reward_dim_honors_wrappers()
+
+
 AGENTS = {
     "envelope": Envelope,
     "pql": PQL,
@@ -87,7 +122,7 @@ AGENTS = {
 
 
 def find_model_path(run_id):
-    base = "results/reach_goal"
+    base = "results/reach_goal/pareto_front_small"
     # any folder under base dir that contains run_id (recursive, multiple level of folders and i search the lowest level one)
     for path in Path(base).rglob(f"*{run_id}*"):
         if path.is_dir():
@@ -107,16 +142,22 @@ def make_agent(env, agent_config):
 def make_env(env_config) -> gym.Env:
     use_util = env_config.pop("utilitarian_wrapper", False)
     use_deont = env_config.pop("deontological_wrapper", False)
+    use_interp_weight = env_config.pop("interp_weight_wrapper", False)
+    # length-2 weight over interpretations; InterpWeightWrapper does interp_w @ matrix,
+    # so a scalar would 0-d-matmul-fail. Default to equal weighting.
+    interp_w = env_config.pop("interp_weight", [0.5, 0.5])
     env = gym.make(**env_config)
     if use_util:
         env = UtilitarianWrapper(env)
     elif use_deont:
         env = DeontologicalWrapper(env)
+    elif use_interp_weight:
+        env = InterpWeightWrapper(env, interp_w)
     reward_wrapped = env  # reward space the agent actually sees
     env = MORecordEpisodeStatistics(env)
     # MORecordEpisodeStatistics infers its accumulator dim from env.unwrapped, which
     # bypasses reward wrappers. Sync it to the (possibly projected) reward space.
-    if use_util or use_deont:
+    if use_util or use_deont or use_interp_weight:
         rdim = reward_wrapped.reward_space.shape[0]
         env.reward_dim = rdim
         env.rewards_shape = (rdim,)
