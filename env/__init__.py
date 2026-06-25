@@ -24,3 +24,13 @@ gym.register(
     id="ecc-goal-safe-v0",
     entry_point="env.reach_goal_ecc:ECCReachGoalEnv",
 )
+
+gym.register(
+    id="firefighters-mo-v0",
+    entry_point="env.firefighters_env_mo:FireFightersEnvMO",
+)
+
+gym.register(
+    id="mv-car-v0",
+    entry_point="env.multivalued_car_env:MultiValuedCarEnv",
+)

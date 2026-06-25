@@ -1,0 +1,44 @@
+{
+    "general": {
+        "eval_both_interps": false
+    },
+    "env": {
+        "id": "mv-car-v0",
+        "horizon": 40,
+        "render_mode": null
+    },
+    "train": {
+        "total_timesteps": 200000,
+        "eval_freq": 25000,
+        "num_eval_weights_for_front": 25,
+        "num_eval_episodes_for_front": 5,
+        "num_eval_weights_for_eval": 25,
+        "verbose": true,
+        "num_checkpoints": 3,
+        "out_dir": "results/reach_goal/pareto_front_small"
+    },
+    "eval": {
+        "num_eval_episodes": 50,
+        "num_eval_weights": 50
+    },
+    "agent": {
+        "algorithm": "envelope",
+        "seed": 42,
+        "learning_rate": 1e-4,
+        "initial_epsilon": 1.0,
+        "final_epsilon": 0.01,
+        "epsilon_decay_steps": 5000,
+        "net_arch": [
+            64,
+            64
+        ],
+        "batch_size": 64,
+        "learning_starts": 500,
+        "gradient_updates": 1,
+        "target_net_update_freq": 500,
+        "envelope": true,
+        "per": false,
+        "num_sample_w": 5,
+        "log": true
+    }
+}

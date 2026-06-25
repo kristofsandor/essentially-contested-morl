@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import env  # noqa: F401, registers the envs on import
 
-from scripts.utils import find_model_path, make_agent, make_env
+from scripts.utils import find_model_path, interp_label_list, make_agent, make_env
 from morl_baselines.common.pareto import get_non_pareto_dominated_inds
 from morl_baselines.common.weights import equally_spaced_weights
 
@@ -36,12 +36,12 @@ def eval_agent(
     out_dir,
     num_eval_weights,
     num_eval_episodes,
-    max_episode_steps,
-    num_humans,
-    help_reward,
-    step_penalty,
-    terminal_reward,
-    proximity_reward,
+    max_episode_steps=None,
+    num_humans=None,
+    help_reward=None,
+    step_penalty=None,
+    terminal_reward=None,
+    proximity_reward=None,
     label="",
     use_ecc=False,
     weight_dim=None,
@@ -92,12 +92,12 @@ def eval_agent_(
     out_dir,
     num_eval_weights,
     num_eval_episodes,
-    max_episode_steps,
-    num_humans,
-    help_reward,
-    step_penalty,
-    terminal_reward,
-    proximity_reward,
+    max_episode_steps=None,
+    num_humans=None,
+    help_reward=None,
+    step_penalty=None,
+    terminal_reward=None,
+    proximity_reward=None,
     label="",
     ecc_weight=None,
     weight_dim=None,
@@ -170,87 +170,124 @@ def _eval(eval_env, agent, w,  num_eval_episodes, reward_dim, interp_w = None):
         return ep_returns
 
 
+def _objective_names(n_obj):
+    """Column names for an n_obj objective space.
+
+    Reuse the reach-goal [task, help] names when n_obj matches; otherwise fall back
+    to generic o0…o{n-1} so 3+-objective envs (e.g. the car env) plot cleanly.
+    """
+    if n_obj == len(COMPONENT_NAMES):
+        return list(COMPONENT_NAMES)
+    return [f"o{i}" for i in range(n_obj)]
+
+
 def plot_eval(
     data,
     weights,
     out_dir,
     name,
-    max_episode_steps,
-    num_humans,
-    help_reward,
-    step_penalty,
-    terminal_reward,
-    proximity_reward,
+    max_episode_steps=None,
+    num_humans=None,
+    help_reward=None,
+    step_penalty=None,
+    terminal_reward=None,
+    proximity_reward=None,
 ):
     """
-    Logs the table and plots on wandb, and also saves the plot locally. Called from eval mode.
+    Logs the table and plots on wandb, and also saves the plot(s) locally.
 
+    Generic over objective count: Pareto dominance is computed on the full N-D
+    returns, and one scatter is produced per objective pair (i, j), i < j. For a
+    2-objective env this is the single original plot.
     """
+    n_obj = data.shape[1]
+    obj_names = _objective_names(n_obj)
+
     nd_idxs = get_non_pareto_dominated_inds(data, remove_duplicates=True)
     pf = data[nd_idxs]
-    pf_weights = np.asarray(weights, dtype=np.float32)[nd_idxs]
 
-    # log wandb table
-    table = wandb.Table(data=data, columns=COMPONENT_NAMES)
-    # weights may be wider than the 2 recorded objectives (a full agent sweeps its
-    # native 4-D weight while we record the 2-D projection), so size the columns to
-    # the actual weight vector rather than COMPONENT_NAMES.
+    # log wandb table over all objectives
+    table = wandb.Table(data=data.tolist(), columns=obj_names)
+    # weights may be wider than the recorded objectives (a full agent sweeps its
+    # native weight while we record a projection), so size the columns to the actual
+    # weight vector rather than the objective names.
     w_width = len(np.asarray(weights[0]).ravel())
     weight_cols = (
-        [f"{c}_weight" for c in COMPONENT_NAMES]
-        if w_width == len(COMPONENT_NAMES)
+        [f"{c}_weight" for c in obj_names]
+        if w_width == n_obj
         else [f"w{i}_weight" for i in range(w_width)]
     )
     wandb.log(
         {
             name: table,
-            f"{name}_weights": wandb.Table(data=weights, columns=weight_cols),
+            f"{name}_weights": wandb.Table(
+                data=[list(np.asarray(w).ravel()) for w in weights], columns=weight_cols
+            ),
         }
     )
 
-    wandb.log(
-        {
-            f"{name}_scatter": wandb.plot.scatter(
-                table,
-                x=COMPONENT_NAMES[0],
-                y=COMPONENT_NAMES[1],
-                title=f"{name}: task efficiency vs. humans helped",
-            )
-        }
-    )
-
-    # save the plots to wandb
-    fig, ax = plt.subplots(figsize=(5.0, 5.0))
-    ax.scatter(data[:, 0], data[:, 1], s=30, zorder=3, color="steelblue", label="evaluated")
-    ax.scatter(pf[:, 0], pf[:, 1], s=50, zorder=4, color="red", label="pareto front")
-    ax.legend(fontsize=8)
-    for w_idx, w in enumerate(weights):
-        ax.annotate(
-            f"({w[0]:.2f},{w[1]:.2f})",
-            (data[w_idx, 0], data[w_idx, 1]),
-            fontsize=7,
-            alpha=0.75,
+    # axis limits are reach-goal-specific; only apply them for the canonical 2-D
+    # [task, help] plot when all the shaping constants were supplied.
+    reach_goal_limits = (
+        n_obj == 2
+        and None
+        not in (
+            max_episode_steps,
+            step_penalty,
+            terminal_reward,
+            proximity_reward,
+            num_humans,
+            help_reward,
         )
+    )
 
-    ax.set_xlabel(COMPONENT_NAMES[0])
-    ax.set_ylabel(COMPONENT_NAMES[1])
-    ax.set_title(f"{name}: task efficiency vs. humans helped")
-    ax.grid(True, alpha=0.3)
+    pairs = [(i, j) for i in range(n_obj) for j in range(i + 1, n_obj)]
+    for i, j in pairs:
+        suffix = "" if len(pairs) == 1 else f"_o{i}o{j}"
 
-    x_min = -max_episode_steps * step_penalty - 0.2
-    x_max = terminal_reward + 0.2
-    y_min = -max_episode_steps * proximity_reward
-    y_max = num_humans * help_reward + max_episode_steps * proximity_reward + 0.2
-    ax.set_xlim((x_min, x_max))
-    ax.set_ylim((y_min, y_max))
+        if i == 0 and j == 1:
+            # wandb interactive scatter for the primary objective pair
+            wandb.log(
+                {
+                    f"{name}{suffix}_scatter": wandb.plot.scatter(
+                        table,
+                        x=obj_names[0],
+                        y=obj_names[1],
+                        title=f"{name}: {obj_names[i]} vs. {obj_names[j]}",
+                    )
+                }
+            )
 
-    fig.tight_layout()
-    path = out_dir / f"{name}.png"
-    fig.savefig(path, dpi=140)
-    wandb.log({f"{name}_plot": wandb.Image(str(path))})
-    plt.close(fig)
+        fig, ax = plt.subplots(figsize=(5.0, 5.0))
+        ax.scatter(data[:, i], data[:, j], s=30, zorder=3, color="steelblue", label="evaluated")
+        ax.scatter(pf[:, i], pf[:, j], s=50, zorder=4, color="red", label="pareto front")
+        ax.legend(fontsize=8)
+        for w_idx, w in enumerate(weights):
+            w = np.asarray(w).ravel()
+            ann = ",".join(f"{v:.2f}" for v in w[:2])
+            ax.annotate(f"({ann})", (data[w_idx, i], data[w_idx, j]), fontsize=7, alpha=0.75)
 
-    print(f"[train] saved {name} plot to {path}")
+        ax.set_xlabel(obj_names[i])
+        ax.set_ylabel(obj_names[j])
+        ax.set_title(f"{name}: {obj_names[i]} vs. {obj_names[j]}")
+        ax.grid(True, alpha=0.3)
+
+        if reach_goal_limits:
+            ax.set_xlim((-max_episode_steps * step_penalty - 0.2, terminal_reward + 0.2))
+            ax.set_ylim(
+                (
+                    -max_episode_steps * proximity_reward,
+                    num_humans * help_reward + max_episode_steps * proximity_reward + 0.2,
+                )
+            )
+
+        fig.tight_layout()
+        path = out_dir / f"{name}{suffix}.png"
+        fig.savefig(path, dpi=140)
+        wandb.log({f"{name}{suffix}_plot": wandb.Image(str(path))})
+        plt.close(fig)
+
+        print(f"[train] saved {name}{suffix} plot to {path}")
 
 
 # def get_config_wandb(run_id):
@@ -300,27 +337,26 @@ def eval_run_id(run_id, config=None, render=False, both_interps=False) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if use_ecc or eval_both_interps:
-        interp_weights = {"deontological": [1.0, 0.0], "utilitarian": [0.0, 1.0]}
-        for interp in ("deontological", "utilitarian"):
-            # The deont/util wrappers project the ECC env's raw 4-D reward, so force the
-            # ECC env id here (the agent may have been trained on a non-ECC env, but its
-            # obs space matches and it is queried against the 2-D projection). Pin all
-            # three wrapper flags so the saved env_config's choice never leaks in.
+        num_interps = getattr(agent, "num_interps", 2)
+        for i, label in enumerate(interp_label_list(num_interps)):
+            # Project the raw multi-interpretation reward onto interpretation i. The
+            # reach-goal ECC reward layout lives in the ECC env, so force that id (the
+            # agent may have been trained on a non-ECC env, but its obs space matches
+            # and it is queried against the projection). Pass interp_index explicitly so
+            # the saved env_config's wrapper choice never leaks in.
             interp_env = make_env(
                 {
                     **env_config,
                     "id": "ecc-goal-safe-v0",
-                    "deontological_wrapper": interp == "deontological",
-                    "utilitarian_wrapper": interp == "utilitarian",
-                    "interp_weight_wrapper": False,
+                    "interp_index": i,
                 }
             )
             if use_ecc and hasattr(agent, "set_eval_interp_weight"):
-                agent.set_eval_interp_weight(interp_weights[interp])
-            # Full (4-D) agent: sweep its native weight dim, record the 2-D projection.
+                agent.set_eval_interp_weight(np.eye(num_interps)[i].tolist())
+            # Full agent: sweep its native weight dim, record the projection.
             weight_dim = None if use_ecc else getattr(agent, "reward_dim", None)
             eval_agent(
-                interp_env, agent, label=interp, weight_dim=weight_dim,
+                interp_env, agent, label=label, weight_dim=weight_dim,
                 **eval_config, **env_config
             )
     else:

@@ -19,8 +19,8 @@ from pathlib import Path
 import matplotlib
 
 import wandb
-from scripts.eval_envelope import eval_agent
-from scripts.utils import find_model_path, make_agent, make_env
+from scripts.eval_envelope import eval_agent, wrapped_reward_space
+from scripts.utils import find_model_path, interp_label_list, make_agent, make_env
 
 matplotlib.use("Agg")
 import numpy as np
@@ -52,17 +52,15 @@ def run_train(config) -> None:
     env_ = make_env(env_config.copy())
     eval_env = make_env(env_config.copy())
 
-    # task return ∈ [−step_penalty*max_steps, 0], help return ∈ [0, num_humans*help_reward].
-    # ref_point must be strictly dominated by every Pareto solution. The agent's reward
-    # dim follows the (possibly wrapper-projected) env: 2 per interpretation, or the raw
-    # multi-interpretation stack (e.g. 4 = [task, help] x 2) for a "full" agent, laid out
-    # as repeated [task, help] pairs — so tile the per-pair ref accordingly.
-    reward_dim = getattr(env_, "reward_dim")  # MORecordEpisodeStatistics always exposes this
-    ref_pair = [
-        -env_config.get("step_penalty") * env_config.get("max_episode_steps") - 10,
-        -0.1,
-    ]
-    ref_point = np.array(ref_pair * (reward_dim // 2), dtype=np.float32)
+    # ref_point must be strictly dominated by every Pareto solution. Derive it
+    # env-agnostically from the (possibly wrapper-projected) reward space the agent
+    # actually sees: scale each objective's per-step lower bound by the episode horizon
+    # (worst-case undiscounted return) and subtract a margin. This works for any reward
+    # dim (incl. odd dims like the 3-objective car env) and any env without reach-goal's
+    # step_penalty/max_episode_steps keys, while reproducing the old reach-goal ref.
+    rs = wrapped_reward_space(env_)
+    horizon = env_config.get("max_episode_steps") or env_config.get("horizon") or 1
+    ref_point = (np.asarray(rs.low, dtype=np.float32) * horizon - 10.0).astype(np.float32)
     # Envelope/ECC consume ref_point in __init__; GPI-PD takes it in train() instead.
     if use_gpipd:
         train_config["ref_point"] = ref_point
@@ -118,38 +116,31 @@ def run_train(config) -> None:
     # eval_config may carry its own out_dir; the run's out_dir (above) wins.
     eval_config.pop("out_dir", None)
 
-    # Evaluate on each interpretation's 2-objective projection when either:
-    #  - use_ecc: the ECC policy is conditioned on a [task, help] weight, so it must
-    #    be queried on each interpretation's projection rather than the raw reward; or
+    # Evaluate on each interpretation's projection when either:
+    #  - use_ecc: the ECC policy is conditioned on a per-net weight, so it must be
+    #    queried on each interpretation's projection rather than the raw reward; or
     #  - eval_both_interps: a single-policy agent was trained on one interpretation
-    #    but we still want its return measured under both (e.g. how much util-help a
+    #    but we still want its return measured under each (e.g. how much util-help a
     #    deont-trained policy gives up).
     eval_both_interps = general_config.get("eval_both_interps", False)
     if use_ecc or eval_both_interps:
-        # One-hot interpretation weight per interpretation (row 0 = deontological,
-        # row 1 = utilitarian), so a weight-conditioned agent (e.g. ecc_gpi_pd) is
-        # queried at the interpretation it is being evaluated on.
-        interp_weights = {"deontological": [1.0, 0.0], "utilitarian": [0.0, 1.0]}
-        for interp in ("deontological", "utilitarian"):
-            # Pin all three wrapper flags so the base env_config's choice (which may
-            # already enable one of them) never leaks into the per-interpretation env.
-            interp_env = make_env(
-                {
-                    **env_config,
-                    "deontological_wrapper": interp == "deontological",
-                    "utilitarian_wrapper": interp == "utilitarian",
-                    "interp_weight_wrapper": False,
-                }
-            )
+        # num_interps is ECC's per-net split (default 2 for non-ECC "full" agents).
+        num_interps = getattr(agent, "num_interps", 2)
+        interp_labels = interp_label_list(num_interps)
+        for i, label in enumerate(interp_labels):
+            # Project the raw multi-interpretation reward onto interpretation i. Pass
+            # interp_index explicitly so the base env_config's choice never leaks in.
+            interp_env = make_env({**env_config, "interp_index": i})
             if use_ecc and hasattr(agent, "set_eval_interp_weight"):
-                agent.set_eval_interp_weight(interp_weights[interp])
-            # A single-policy agent is queried with its native weight dim: 2 for an
-            # interpretation-trained agent (matches the projected env), or the raw dim
-            # for a "full" agent trained on all interpretations and evaluated on each
-            # 2-D projection. ECC keeps the default (2-D [task, help] weight).
+                # One-hot interp weight so a weight-conditioned agent (e.g. ecc_gpi_pd)
+                # is queried at the interpretation it is being evaluated on.
+                agent.set_eval_interp_weight(np.eye(num_interps)[i].tolist())
+            # A single-policy agent is queried with its native weight dim: net_reward_dim
+            # for an interpretation-trained agent (matches the projected env), or the raw
+            # dim for a "full" agent evaluated on each projection. ECC keeps the default.
             weight_dim = None if use_ecc else getattr(agent, "reward_dim", None)
             eval_agent(
-                interp_env, agent, out_dir, label=interp, weight_dim=weight_dim,
+                interp_env, agent, out_dir, label=label, weight_dim=weight_dim,
                 **eval_config, **env_config
             )
     else:

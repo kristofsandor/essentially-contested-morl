@@ -12,7 +12,12 @@ from agent.ecc_gpi_pd import ECCGPIPD
 from pathlib import Path
 
 from agent.ucb_envelope import UCBEnvelope
-from wrappers.matrix_to_vector import DeontologicalWrapper, InterpWeightWrapper, UtilitarianWrapper
+from wrappers.matrix_to_vector import (
+    DeontologicalWrapper,
+    InterpProjectionWrapper,
+    InterpWeightWrapper,
+    UtilitarianWrapper,
+)
 
 
 def _patch_linear_support_exact_arithmetic() -> None:
@@ -121,6 +126,18 @@ AGENTS = {
 }
 
 
+def interp_label_list(num_interps):
+    """Human-readable labels for each ECC interpretation.
+
+    The reach-goal ECC env uses exactly two interpretations; preserve its
+    deontological/utilitarian output filenames for backward compatibility. For any
+    other interpretation count, fall back to generic ``interp_0 … interp_{n-1}``.
+    """
+    if num_interps == 2:
+        return ["deontological", "utilitarian"]
+    return [f"interp_{i}" for i in range(num_interps)]
+
+
 def find_model_path(run_id):
     base = "results/reach_goal/pareto_front_small"
     # any folder under base dir that contains run_id (recursive, multiple level of folders and i search the lowest level one)
@@ -140,14 +157,21 @@ def make_agent(env, agent_config):
 
 
 def make_env(env_config) -> gym.Env:
+    # interp_index projects the flattened reward matrix onto a single interpretation
+    # (the num_interps-generic path used by the per-interpretation eval). The boolean
+    # flags are kept for backward compatibility: deontological == index 0, utilitarian
+    # == index 1.
+    interp_index = env_config.pop("interp_index", None)
     use_util = env_config.pop("utilitarian_wrapper", False)
     use_deont = env_config.pop("deontological_wrapper", False)
     use_interp_weight = env_config.pop("interp_weight_wrapper", False)
-    # length-2 weight over interpretations; InterpWeightWrapper does interp_w @ matrix,
+    # weight over interpretations; InterpWeightWrapper does interp_w @ matrix,
     # so a scalar would 0-d-matmul-fail. Default to equal weighting.
     interp_w = env_config.pop("interp_weight", [0.5, 0.5])
     env = gym.make(**env_config)
-    if use_util:
+    if interp_index is not None:
+        env = InterpProjectionWrapper(env, interp_index)
+    elif use_util:
         env = UtilitarianWrapper(env)
     elif use_deont:
         env = DeontologicalWrapper(env)
@@ -157,7 +181,7 @@ def make_env(env_config) -> gym.Env:
     env = MORecordEpisodeStatistics(env)
     # MORecordEpisodeStatistics infers its accumulator dim from env.unwrapped, which
     # bypasses reward wrappers. Sync it to the (possibly projected) reward space.
-    if use_util or use_deont or use_interp_weight:
+    if interp_index is not None or use_util or use_deont or use_interp_weight:
         rdim = reward_wrapped.reward_space.shape[0]
         env.reward_dim = rdim
         env.rewards_shape = (rdim,)
