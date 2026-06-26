@@ -235,10 +235,16 @@ class ECCEnvelope(MOPolicy, MOAgent):
         self.final_homotopy_lambda = final_homotopy_lambda
         self.homotopy_decay_steps = homotopy_decay_steps
         self.use_hv = use_hv
-        self.ref_point = ref_point
+        # Accept a plain list (e.g. from a JSON config) or an array.
+        self.ref_point = np.asarray(ref_point, dtype=np.float32)
         self.dirichlet_alpha = dirichlet_alpha
         self.num_interps = num_interps
-        self.interp_weight = interp_weight  # default / eval interp weight
+        self.interp_weight = interp_weight  # default training interp weight
+        # Interpretation weight used by greedy eval / max_action. Defaults to the
+        # training interp_weight; pin a one-hot via set_eval_interp_weight to query a
+        # single interpretation (mirrors ECCGPIPD so callers with a fixed eval(obs, w)
+        # signature, e.g. the per-interpretation sweep, work without passing interp_w).
+        self._eval_interp_w = np.asarray(interp_weight, dtype=np.float32)
         self.ucb_beta = ucb_beta
         self.ucb_n_candidates = ucb_n_candidates
         self.ucb_neighbor_dist = ucb_neighbor_dist
@@ -653,8 +659,24 @@ class ECCEnvelope(MOPolicy, MOAgent):
             print(f"| {key:<{key_w}} | {val:>{val_w}} |")
         print(sep)
 
+    def set_eval_interp_weight(self, interp_w) -> None:
+        """Set the interpretation weight used by greedy ``eval`` / ``max_action``.
+
+        Lets evaluation query the conditioned policy at a specific interpretation,
+        e.g. one-hot ``[1, 0]`` for the first interpretation. Mirrors ``ECCGPIPD`` so
+        the per-interpretation eval sweep can pin an interpretation without threading
+        ``interp_w`` through every ``eval(obs, w)`` call.
+        """
+        iw = np.asarray(interp_w, dtype=np.float32)
+        assert iw.shape == (self.num_interps,), (
+            f"interp_w must have shape ({self.num_interps},), got {iw.shape}"
+        )
+        self._eval_interp_w = iw
+
     @override
-    def eval(self, obs: np.ndarray, w: np.ndarray, interp_w: np.ndarray) -> int:
+    def eval(self, obs: np.ndarray, w: np.ndarray, interp_w: np.ndarray = None) -> int:
+        if interp_w is None:
+            interp_w = self._eval_interp_w
         obs = th.as_tensor(obs).float().to(self.device)
         w = th.as_tensor(w).float().to(self.device)
         interp_w = th.as_tensor(interp_w).float().to(self.device)

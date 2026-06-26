@@ -8,6 +8,7 @@
         "render_mode": null
     },
     "train": {
+        "ref_point": [-40.0, -50.0, -50.0],
         "total_timesteps": 50000,
         "weight_selection_algo": "gpi-ls",
         "timesteps_per_iter": 5000,

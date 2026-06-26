@@ -882,6 +882,8 @@ class GPIPD(MOPolicy, MOAgent):
             eval_mo_freq (int): Number of timesteps between multi-objective evaluations.
             num_checkpoints (int): Number of checkpoints to save.
         """
+        # Accept a plain list (e.g. from a JSON config) or an array.
+        ref_point = np.asarray(ref_point, dtype=np.float32)
         if self.log:
             self.register_additional_config(
                 {

@@ -1,132 +1,35 @@
 Bootstrap: docker
-From: condaforge/miniforge3:latest
+From: ubuntu:22.04
 
 %labels
-    Author REIT Team
-    Description Apptainer container template with conda environment and JupyterLab
-
-%help
-    This is an Apptainer container with a conda environment and JupyterLab.
-
-    Usage:
-        # Run interactive shell
-        apptainer shell <container>.sif
-
-        # Execute a command
-        apptainer exec <container>.sif <command>
-
-        # Run JupyterLab (example)
-        apptainer exec <container>.sif jupyter-lab --no-browser --ip=0.0.0.0
-
-    The conda environment 'apptainer' is automatically activated when
-    the container starts.
-
-%files
-    # Copy conda environment specification
-    environment.yml /environment.yml
-    # Copy pip requirements
-    requirements.txt /requirements.txt
-    # Copy build metadata
-    .build_info /.build_info
+    Author kristofasandor
+    Description Apptainer environment for the md-morl project, Python 3.12
 
 %post
-    # Exit on error
-    set -e
+    apt-get update && apt-get install -y curl git build-essential libgmp-dev && apt-get clean
 
-    echo "========================================="
-    echo "Building Apptainer container"
-    echo "========================================="
+    # install uv to a system location
+    curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR="/usr/local/bin" sh
 
-    # Display build version information
-    if [[ -f /.build_info ]]; then
-        echo "Build metadata:"
-        cat /.build_info | sed 's/^/  /'
-        echo ""
-    fi
+    # keep the managed Python and venv in /opt so a mounted $HOME cannot shadow them
+    export UV_PYTHON_INSTALL_DIR=/opt/uv/python
+    uv python install 3.12
+    uv venv /opt/venv --python 3.12
+    export VIRTUAL_ENV=/opt/venv
+    export PATH="/opt/venv/bin:$PATH"
 
-    # Update and install necessary packages
-    echo "Installing system packages..."
-    apt-get update && \
-        DEBIAN_FRONTEND=noninteractive TZ=Europe/Amsterdam \
-        apt-get install -y \
-            build-essential \
-            git \
-            vim
-
-    # Optional system packages (uncomment as needed):
-    # tree ncdu htop curl wget
-
-    # Create a new Conda environment with JupyterLab
-    echo "Creating conda environment..."
-    mamba env create --yes --quiet --file /environment.yml
-
-    # Clean up to reduce container size
-    echo "Cleaning up..."
-    apt-get clean && rm -rf /var/lib/apt/lists/*
-    mamba clean --all -y
-
-    # Configure environment activation
-    echo "Configuring automatic environment activation..."
-
-    # For Apptainer shell/exec
-    echo '. "/opt/conda/etc/profile.d/conda.sh"' >> $APPTAINER_ENVIRONMENT
-    echo 'conda activate apptainer' >> $APPTAINER_ENVIRONMENT
-
-    # For JupyterLab terminal shells (and other interactive shells)
-    # Add to system-wide bashrc so it works for all users
-    cat >> /etc/bash.bashrc <<'EOF'
-
-# Activate conda environment automatically in all bash shells
-if [ -f "/opt/conda/etc/profile.d/conda.sh" ]; then
-    . "/opt/conda/etc/profile.d/conda.sh"
-    conda activate apptainer
-fi
-EOF
-
-    # Also add to root's .bashrc for good measure
-    cat >> /root/.bashrc <<'EOF'
-
-# Activate conda environment automatically
-if [ -f "/opt/conda/etc/profile.d/conda.sh" ]; then
-    . "/opt/conda/etc/profile.d/conda.sh"
-    conda activate apptainer
-fi
-EOF
-
-    echo "========================================="
-    echo "Container build completed successfully!"
-    echo "========================================="
+    # dependencies
+    uv pip install pycddlib-standalone
+    uv pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+    uv pip install gymnasium mo-gymnasium tqdm numpy matplotlib pymoo wandb \
+        ipywidgets cvxpy fire imageio moviepy pygame scipy seaborn sortedcontainers
+    uv pip install git+https://github.com/LucasAlegre/morl-baselines.git --no-deps
 
 %environment
-    # Set environment variables available at runtime
-    export LC_ALL=C
     export PYTHONUNBUFFERED=1
+    export VIRTUAL_ENV=/opt/venv
+    export PATH="/opt/venv/bin:$PATH"
+    export UV_PYTHON_INSTALL_DIR=/opt/uv/python
 
 %runscript
-    # Default action when container is run with 'apptainer run'
-    echo "========================================="
-    echo "Apptainer Container"
-    echo "========================================="
-
-    # Display version information
-    if [[ -f /.build_info ]]; then
-        source /.build_info
-        echo "Version: ${VERSION}"
-        echo "Git commit: ${GIT_COMMIT}"
-        if [[ -n "${GIT_TAG}" ]]; then
-            echo "Git tag: ${GIT_TAG}"
-        fi
-        if [[ "${GIT_DIRTY}" == "true" ]]; then
-            echo "⚠ Built with uncommitted changes (dirty)"
-        fi
-        echo "Built: ${BUILD_DATE}"
-    fi
-
-    echo ""
-    echo "Python version: $(python --version 2>&1)"
-    echo "Conda environment: ${CONDA_DEFAULT_ENV}"
-    echo "========================================="
-    echo ""
-
-    exec "$@"
-
+    exec /opt/venv/bin/python "$@"

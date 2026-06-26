@@ -290,18 +290,6 @@ def plot_eval(
         print(f"[train] saved {name}{suffix} plot to {path}")
 
 
-# def get_config_wandb(run_id):
-#     """
-#     Retrieves the whole config for a given run_id from wandb, including env_config, agent_config, eval_config and train_config.
-
-#     """
-#     # load config from summary metrics of the run (this is where we log the whole config as a dict in train_reach_goal.py)
-#     api = wandb.Api()
-#     run = api.run(f"MORL-Baselines/{run_id}")
-#     config = run.config
-#     return config
-
-
 def eval_run_id(run_id, config=None, render=False, both_interps=False) -> None:
     print(f"[eval] loading config from wandb for run {run_id} ...")
     wandb.init(id=run_id, resume="allow", project="MORL-Baselines")
@@ -338,7 +326,7 @@ def eval_run_id(run_id, config=None, render=False, both_interps=False) -> None:
 
     if use_ecc or eval_both_interps:
         num_interps = getattr(agent, "num_interps", 2)
-        for i, label in enumerate(interp_label_list(num_interps)):
+        for i, label in enumerate(interp_label_list(num_interps, base_env)):
             # Project the raw multi-interpretation reward onto interpretation i. The
             # reach-goal ECC reward layout lives in the ECC env, so force that id (the
             # agent may have been trained on a non-ECC env, but its obs space matches

@@ -108,7 +108,7 @@ class QNet(nn.Module):
         self.obs_shape = obs_shape
         self.action_dim = action_dim
         self.phi_dim = rew_dim
-        self.num_interp = num_interp
+        self.num_interps = num_interp
 
         self.interp_features = mlp(num_interp, -1, net_arch[:1])
         self.weights_features = mlp(rew_dim, -1, net_arch[:1])
@@ -183,7 +183,7 @@ class ECCGPIPD(MOPolicy, MOAgent):
         log: bool = True,
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
-        num_interp: int = 2,
+        num_interps: int = 2,
         interp_dirichlet_alpha: float = 0.8,
         eval_interp_weight: Optional[np.ndarray] = None,
     ):
@@ -253,14 +253,14 @@ class ECCGPIPD(MOPolicy, MOAgent):
         self.num_nets = num_nets
         self.drop_rate = drop_rate
         self.layer_norm = layer_norm
-        self.num_interp = num_interp
+        self.num_interps = num_interps
         # interp_w (ethical-interpretation weight) is a conditioning input. It is
         # sampled randomly (Dirichlet) per episode for data collection and per batch
         # for training; greedy eval / GPI-LS use a fixed reference (uniform unless
         # overridden via eval_interp_weight).
         self.interp_dirichlet_alpha = interp_dirichlet_alpha
         self._eval_interp_w = (
-            np.ones(self.num_interp, dtype=np.float32) / self.num_interp
+            np.ones(self.num_interps, dtype=np.float32) / self.num_interps
             if eval_interp_weight is None
             else np.asarray(eval_interp_weight, dtype=np.float32)
         )
@@ -268,10 +268,10 @@ class ECCGPIPD(MOPolicy, MOAgent):
         # The env reward is a flattened [num_interp, net_reward_dim] matrix. The nets
         # and the GPI-LS objective weight ``w`` live in the net_reward_dim space; the
         # per-interpretation rows are collapsed into it via interp_w in the TD target.
-        assert self.reward_dim % self.num_interp == 0, (
-            f"reward_dim={self.reward_dim} not divisible by num_interp={self.num_interp}"
+        assert self.reward_dim % self.num_interps == 0, (
+            f"reward_dim={self.reward_dim} not divisible by num_interps={self.num_interps}"
         )
-        self.net_reward_dim = self.reward_dim // self.num_interp
+        self.net_reward_dim = self.reward_dim // self.num_interps
 
         # Q-Networks
         self.q_nets = [
@@ -279,7 +279,7 @@ class ECCGPIPD(MOPolicy, MOAgent):
                 self.observation_shape,
                 self.action_dim,
                 self.net_reward_dim,
-                self.num_interp,
+                self.num_interps,
                 net_arch=net_arch,
                 drop_rate=drop_rate,
                 layer_norm=layer_norm,
@@ -291,7 +291,7 @@ class ECCGPIPD(MOPolicy, MOAgent):
                 self.observation_shape,
                 self.action_dim,
                 self.net_reward_dim,
-                self.num_interp,
+                self.num_interps,
                 net_arch=net_arch,
                 drop_rate=drop_rate,
                 layer_norm=layer_norm,
@@ -499,7 +499,7 @@ class ECCGPIPD(MOPolicy, MOAgent):
 
     def _sample_interp_w(self, n: Optional[int] = None) -> np.ndarray:
         """Sample interpretation weight(s) from a Dirichlet over the interp simplex."""
-        alpha = np.ones(self.num_interp, dtype=np.float64) * self.interp_dirichlet_alpha
+        alpha = np.ones(self.num_interps, dtype=np.float64) * self.interp_dirichlet_alpha
         if n is None:
             return self.np_random.dirichlet(alpha).astype(np.float32)
         return self.np_random.dirichlet(alpha, n).astype(np.float32)
@@ -513,7 +513,7 @@ class ECCGPIPD(MOPolicy, MOAgent):
         if interp_w is None:
             interp_w = self._eval_interp_w
         iw = th.as_tensor(interp_w, dtype=th.float32, device=self.device)
-        return iw.expand(*w.shape[:-1], self.num_interp)
+        return iw.expand(*w.shape[:-1], self.num_interps)
 
     def set_eval_interp_weight(self, interp_w) -> None:
         """Set the interpretation weight used by greedy ``eval`` / ``max_action``.
@@ -524,8 +524,8 @@ class ECCGPIPD(MOPolicy, MOAgent):
         eval env inside ``train`` is built separately from ``self._eval_interp_w``.
         """
         iw = np.asarray(interp_w, dtype=np.float32)
-        assert iw.shape == (self.num_interp,), (
-            f"interp_w must have shape ({self.num_interp},), got {iw.shape}"
+        assert iw.shape == (self.num_interps,), (
+            f"interp_w must have shape ({self.num_interps},), got {iw.shape}"
         )
         self._eval_interp_w = iw
 
@@ -563,7 +563,7 @@ class ECCGPIPD(MOPolicy, MOAgent):
             s_rewards = th.einsum(
                 "ni,nir->nr",
                 interp_w,
-                s_rewards.view(-1, self.num_interp, self.net_reward_dim),
+                s_rewards.view(-1, self.num_interps, self.net_reward_dim),
             )
 
             if len(self.weight_support) > 5:
@@ -785,7 +785,7 @@ class ECCGPIPD(MOPolicy, MOAgent):
             iw_b = self._interp_w_like(w_b)
             # Project the flattened env reward into net_reward_dim at the eval interp_w.
             rewards = th.einsum(
-                "ni,nir->nr", iw_b, rewards.view(-1, self.num_interp, self.net_reward_dim)
+                "ni,nir->nr", iw_b, rewards.view(-1, self.num_interps, self.net_reward_dim)
             )
             q_values = self.q_nets[0](obs, w_b, iw_b)
             q_a = q_values.gather(1, actions.long().reshape(-1, 1, 1).expand(q_values.size(0), 1, q_values.size(2))).squeeze(1)
@@ -813,7 +813,7 @@ class ECCGPIPD(MOPolicy, MOAgent):
     def _envelope_target(self, obs: th.Tensor, w: th.Tensor, sampled_w: th.Tensor, interp_w: th.Tensor):
         W = sampled_w.unsqueeze(0).repeat(obs.size(0), 1, 1)
         # interp_w is [N, num_interp]; broadcast across the sampled-weight axis.
-        IW = interp_w.unsqueeze(1).expand(obs.size(0), sampled_w.size(0), self.num_interp)
+        IW = interp_w.unsqueeze(1).expand(obs.size(0), sampled_w.size(0), self.num_interps)
         next_obs = obs.unsqueeze(1).repeat(1, sampled_w.size(0), 1)
 
         next_q_target = th.stack(
@@ -898,8 +898,8 @@ class ECCGPIPD(MOPolicy, MOAgent):
             if episode_return.shape == scalar_weight.shape:
                 return float(np.dot(episode_return, scalar_weight))
 
-            if episode_return.size == self.reward_dim and self.reward_dim == self.num_interp * self.net_reward_dim:
-                reward_matrix = episode_return.reshape(self.num_interp, self.net_reward_dim)
+            if episode_return.size == self.reward_dim and self.reward_dim == self.num_interps * self.net_reward_dim:
+                reward_matrix = episode_return.reshape(self.num_interps, self.net_reward_dim)
                 projected_return = np.array(
                     [
                         reward_matrix[0, 0],
@@ -1003,6 +1003,8 @@ class ECCGPIPD(MOPolicy, MOAgent):
             eval_mo_freq (int): Number of timesteps between multi-objective evaluations.
             num_checkpoints (int): Number of checkpoints to save.
         """
+        # Accept a plain list (e.g. from a JSON config) or an array.
+        ref_point = np.asarray(ref_point, dtype=np.float32)
         if self.log:
             self.register_additional_config(
                 {

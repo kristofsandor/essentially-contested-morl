@@ -116,6 +116,52 @@ def _patch_reward_dim_honors_wrappers() -> None:
 _patch_reward_dim_honors_wrappers()
 
 
+def _patch_wandb_media_tmp_dir() -> None:
+    """Recreate wandb's media staging dir on demand so long runs don't crash.
+
+    wandb stages logged media (``wandb.Table``/``wandb.Image``) in a process-wide
+    temp dir (``MEDIA_TMP``) created once at import under the system temp folder.
+    On long (e.g. overnight) runs, Windows temp cleanup can delete that dir, so the
+    next table/image write fails with ``FileNotFoundError`` inside ``bind_to_run`` —
+    killing training over a non-essential log (observed in ``log_all_multi_policy_metrics``
+    logging ``eval/front``). Wrap the media ``bind_to_run`` methods to ``makedirs`` the
+    staging dir first. No-ops if wandb's internals differ from what we expect.
+    """
+    import importlib
+    import os
+
+    try:
+        table_mod = importlib.import_module("wandb.sdk.data_types.table")
+        media_mod = importlib.import_module("wandb.sdk.data_types.base_types.media")
+        media_tmp = getattr(table_mod, "MEDIA_TMP")
+        targets = [media_mod.Media, table_mod.Table]
+    except Exception:
+        return
+
+    def _wrap(cls):
+        # Only wrap classes that define their own bind_to_run (so we patch both the
+        # base Media and Table's override), and guard against double-patching.
+        if "bind_to_run" not in cls.__dict__ or getattr(cls.bind_to_run, "_media_tmp_patched", False):
+            return
+        orig = cls.__dict__["bind_to_run"]
+
+        def bind_to_run(self, *args, **kwargs):
+            try:
+                os.makedirs(media_tmp.name, exist_ok=True)
+            except Exception:
+                pass
+            return orig(self, *args, **kwargs)
+
+        bind_to_run._media_tmp_patched = True
+        cls.bind_to_run = bind_to_run
+
+    for cls in targets:
+        _wrap(cls)
+
+
+_patch_wandb_media_tmp_dir()
+
+
 AGENTS = {
     "envelope": Envelope,
     "pql": PQL,
@@ -126,13 +172,19 @@ AGENTS = {
 }
 
 
-def interp_label_list(num_interps):
+def interp_label_list(num_interps, env=None):
     """Human-readable labels for each ECC interpretation.
 
-    The reach-goal ECC env uses exactly two interpretations; preserve its
-    deontological/utilitarian output filenames for backward compatibility. For any
-    other interpretation count, fall back to generic ``interp_0 … interp_{n-1}``.
+    Prefers the env's own ``interpretation_labels`` when present (e.g. the
+    firefighters ECC env names them 'graded'/'idealist'), so eval outputs are
+    labelled meaningfully. Otherwise: the reach-goal ECC env uses exactly two
+    interpretations, so preserve its deontological/utilitarian output filenames for
+    backward compatibility; for any other count fall back to ``interp_0 … interp_{n-1}``.
     """
+    if env is not None:
+        labels = getattr(getattr(env, "unwrapped", env), "interpretation_labels", None)
+        if labels is not None and len(labels) == num_interps:
+            return list(labels)
     if num_interps == 2:
         return ["deontological", "utilitarian"]
     return [f"interp_{i}" for i in range(num_interps)]
@@ -147,10 +199,7 @@ def find_model_path(run_id):
 
 
 def make_agent(env, agent_config):
-    if "algorithm" not in agent_config:
-        agent_name = "envelope"
-    else:
-        agent_name = agent_config.pop("algorithm")
+    agent_name = agent_config.pop("algorithm")
     if agent_name not in AGENTS:
         raise ValueError(f"unknown agent name {agent_name}")
     return AGENTS[agent_name](env=env, **agent_config)

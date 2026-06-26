@@ -21,6 +21,7 @@
         "num_eval_weights": 50
     },
     "agent": {
+        "ref_point": [0.0, 0.0],
         "algorithm": "envelope",
         "seed": 42,
         "learning_rate": 1e-4,

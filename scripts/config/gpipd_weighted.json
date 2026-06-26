@@ -18,6 +18,7 @@
         "interp_weight": [0.5, 0.5]
     },
     "train": {
+        "ref_point": [-16.25, -0.1],
         "total_timesteps": 50000,
         "weight_selection_algo": "gpi-ls", 
         "timesteps_per_iter": 5000, 

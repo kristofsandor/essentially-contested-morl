@@ -34,3 +34,8 @@ gym.register(
     id="mv-car-v0",
     entry_point="env.multivalued_car_env:MultiValuedCarEnv",
 )
+
+gym.register(
+    id="firefighters-mo-ecc-v0",
+    entry_point="env.firefighters_ecc:ECCFireFightersEnvMO",
+)

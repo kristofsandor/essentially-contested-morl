@@ -19,7 +19,7 @@ from pathlib import Path
 import matplotlib
 
 import wandb
-from scripts.eval_envelope import eval_agent, wrapped_reward_space
+from scripts.eval_envelope import eval_agent
 from scripts.utils import find_model_path, interp_label_list, make_agent, make_env
 
 matplotlib.use("Agg")
@@ -40,35 +40,13 @@ def run_train(config) -> None:
     train_config = config["train"]
     eval_config = config["eval"]
 
-    run_id = general_config.get("continue_run_id", "")
-    # ECC trains per-interpretation nets on a 2-objective [task, help] weight, so it
-    # must be evaluated on each interpretation's projection rather than the raw reward.
-    use_ecc = general_config.get("use_ecc", agent_config.get("algorithm") == "ecc_envelope")
-    # GPI-PD takes ref_point in train() (not __init__) and has a different train()
-    # signature than Envelope, so the ref_point/train wiring below branches on it.
-    use_gpipd = agent_config.get("algorithm") == "gpi_pd" or agent_config.get("algorithm") == "ecc_gpi_pd"
 
     print( f"[train] total_timesteps={train_config.get('total_timesteps')}")
     env_ = make_env(env_config.copy())
     eval_env = make_env(env_config.copy())
+    agent = make_agent(env=env_, agent_config=agent_config.copy())
 
-    # ref_point must be strictly dominated by every Pareto solution. Derive it
-    # env-agnostically from the (possibly wrapper-projected) reward space the agent
-    # actually sees: scale each objective's per-step lower bound by the episode horizon
-    # (worst-case undiscounted return) and subtract a margin. This works for any reward
-    # dim (incl. odd dims like the 3-objective car env) and any env without reach-goal's
-    # step_penalty/max_episode_steps keys, while reproducing the old reach-goal ref.
-    rs = wrapped_reward_space(env_)
-    horizon = env_config.get("max_episode_steps") or env_config.get("horizon") or 1
-    ref_point = (np.asarray(rs.low, dtype=np.float32) * horizon - 10.0).astype(np.float32)
-    # Envelope/ECC consume ref_point in __init__; GPI-PD takes it in train() instead.
-    if use_gpipd:
-        train_config["ref_point"] = ref_point
-    else:
-        agent_config["ref_point"] = ref_point
-
-    agent = make_agent(env=env_, agent_config=agent_config)
-
+    run_id = general_config.get("continue_run_id", "")
     if run_id:
         agent_path = find_model_path(run_id)
         print(f"[train] loading agent from {agent_path} ...")
@@ -84,24 +62,23 @@ def run_train(config) -> None:
         }
     )
 
-    # Snapshot the agent implementation to W&B's Code tab for this run, so the run
-    # records exactly which learner source produced it.
-    # GPI-PD's source lives in site-packages (morl_baselines), not this repo, so there
-    # is nothing under root="." to snapshot for it.
-    if not use_gpipd:
-        agent_src = "agent/ecc_envelope.py" if use_ecc else "agent/envelope.py"
-        wandb.run.log_code(
-            root=".",
-            include_fn=lambda path, *_: path.replace("\\", "/").endswith(agent_src),
-        )
+    # Snapshot the agent implementation to W&B's Code tab for this run
+    agent_src = f"agent/{agent_config.get("algorithm")}.py"
+    wandb.run.log_code(
+        root=".",
+        include_fn=lambda path, *_: path.replace("\\", "/").endswith(agent_src),
+    )
 
     print("[train] training Envelope ...")
     agent.train(eval_env=eval_env, **train_config)
 
-    run_id = f"small__{train_config.get('total_timesteps')}__{wandb.run.id}"
+    run_id = (
+        f"{agent_config.get('algorithm')}__"
+        f"{train_config.get('total_timesteps')}__"
+        f"{wandb.run.id}"
+    )
 
-    out_dir = train_config.get("out_dir", "results/reach_goal/pareto_front")
-    out_dir = Path(out_dir) / run_id
+    out_dir = Path("results") / env_config["id"] / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -122,11 +99,12 @@ def run_train(config) -> None:
     #  - eval_both_interps: a single-policy agent was trained on one interpretation
     #    but we still want its return measured under each (e.g. how much util-help a
     #    deont-trained policy gives up).
+    use_ecc = general_config.get("use_ecc")
     eval_both_interps = general_config.get("eval_both_interps", False)
     if use_ecc or eval_both_interps:
         # num_interps is ECC's per-net split (default 2 for non-ECC "full" agents).
         num_interps = getattr(agent, "num_interps", 2)
-        interp_labels = interp_label_list(num_interps)
+        interp_labels = interp_label_list(num_interps, eval_env)
         for i, label in enumerate(interp_labels):
             # Project the raw multi-interpretation reward onto interpretation i. Pass
             # interp_index explicitly so the base env_config's choice never leaks in.

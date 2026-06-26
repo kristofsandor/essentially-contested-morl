@@ -1,0 +1,132 @@
+Bootstrap: docker
+From: condaforge/miniforge3:latest
+
+%labels
+    Author REIT Team
+    Description Apptainer container template with conda environment and JupyterLab
+
+%help
+    This is an Apptainer container with a conda environment and JupyterLab.
+
+    Usage:
+        # Run interactive shell
+        apptainer shell <container>.sif
+
+        # Execute a command
+        apptainer exec <container>.sif <command>
+
+        # Run JupyterLab (example)
+        apptainer exec <container>.sif jupyter-lab --no-browser --ip=0.0.0.0
+
+    The conda environment 'apptainer' is automatically activated when
+    the container starts.
+
+%files
+    # Copy conda environment specification
+    environment.yml /environment.yml
+    # Copy pip requirements
+    requirements.txt /requirements.txt
+    # Copy build metadata
+    .build_info /.build_info
+
+%post
+    # Exit on error
+    set -e
+
+    echo "========================================="
+    echo "Building Apptainer container"
+    echo "========================================="
+
+    # Display build version information
+    if [[ -f /.build_info ]]; then
+        echo "Build metadata:"
+        cat /.build_info | sed 's/^/  /'
+        echo ""
+    fi
+
+    # Update and install necessary packages
+    echo "Installing system packages..."
+    apt-get update && \
+        DEBIAN_FRONTEND=noninteractive TZ=Europe/Amsterdam \
+        apt-get install -y \
+            build-essential \
+            git \
+            vim
+
+    # Optional system packages (uncomment as needed):
+    # tree ncdu htop curl wget
+
+    # Create a new Conda environment with JupyterLab
+    echo "Creating conda environment..."
+    mamba env create --yes --quiet --file /environment.yml
+
+    # Clean up to reduce container size
+    echo "Cleaning up..."
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+    mamba clean --all -y
+
+    # Configure environment activation
+    echo "Configuring automatic environment activation..."
+
+    # For Apptainer shell/exec
+    echo '. "/opt/conda/etc/profile.d/conda.sh"' >> $APPTAINER_ENVIRONMENT
+    echo 'conda activate apptainer' >> $APPTAINER_ENVIRONMENT
+
+    # For JupyterLab terminal shells (and other interactive shells)
+    # Add to system-wide bashrc so it works for all users
+    cat >> /etc/bash.bashrc <<'EOF'
+
+# Activate conda environment automatically in all bash shells
+if [ -f "/opt/conda/etc/profile.d/conda.sh" ]; then
+    . "/opt/conda/etc/profile.d/conda.sh"
+    conda activate apptainer
+fi
+EOF
+
+    # Also add to root's .bashrc for good measure
+    cat >> /root/.bashrc <<'EOF'
+
+# Activate conda environment automatically
+if [ -f "/opt/conda/etc/profile.d/conda.sh" ]; then
+    . "/opt/conda/etc/profile.d/conda.sh"
+    conda activate apptainer
+fi
+EOF
+
+    echo "========================================="
+    echo "Container build completed successfully!"
+    echo "========================================="
+
+%environment
+    # Set environment variables available at runtime
+    export LC_ALL=C
+    export PYTHONUNBUFFERED=1
+
+%runscript
+    # Default action when container is run with 'apptainer run'
+    echo "========================================="
+    echo "Apptainer Container"
+    echo "========================================="
+
+    # Display version information
+    if [[ -f /.build_info ]]; then
+        source /.build_info
+        echo "Version: ${VERSION}"
+        echo "Git commit: ${GIT_COMMIT}"
+        if [[ -n "${GIT_TAG}" ]]; then
+            echo "Git tag: ${GIT_TAG}"
+        fi
+        if [[ "${GIT_DIRTY}" == "true" ]]; then
+            echo "⚠ Built with uncommitted changes (dirty)"
+        fi
+        echo "Built: ${BUILD_DATE}"
+    fi
+
+    echo ""
+    echo "Python version: $(python --version 2>&1)"
+    echo "Conda environment: ${CONDA_DEFAULT_ENV}"
+    echo "========================================="
+    echo ""
+
+    exec "$@"
+

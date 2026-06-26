@@ -5,7 +5,11 @@
     },
     "env": {
         "id": "firefighters-mo-ecc-v0",
-        "horizon": 50
+        "horizon": 50,
+        "interpretation_labels": [
+            "graded",
+            "idealist"
+        ]
     },
     "train": {
         "total_timesteps": 200000,
@@ -22,6 +26,7 @@
         "num_eval_weights": 50
     },
     "agent": {
+        "ref_point": [0.0, 0.0],
         "algorithm": "ecc_envelope",
         "seed": 42,
         "learning_rate": 1e-4,
