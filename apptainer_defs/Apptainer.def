@@ -25,6 +25,9 @@ From: ubuntu:22.04
         ipywidgets cvxpy fire imageio moviepy pygame scipy seaborn sortedcontainers
     uv pip install git+https://github.com/LucasAlegre/morl-baselines.git --no-deps
 
+    # create bind-mount points so -B targets exist inside the image
+    mkdir -p /project-storage
+
 %environment
     export PYTHONUNBUFFERED=1
     export VIRTUAL_ENV=/opt/venv

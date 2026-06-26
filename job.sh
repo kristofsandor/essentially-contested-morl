@@ -1,27 +1,28 @@
 #!/bin/sh
-#SBATCH --job-name="gpipd-four-room-job"
+#SBATCH --job-name=""
 #SBATCH --account="ksandor"
 #SBATCH --partition="general"      # Request partition.
-#SBATCH --time=01:00:00            # Request run time (wall-clock). Default is 1 minute
+#SBATCH --time=02:00:00            # Request run time (wall-clock). Default is 1 minute
 #SBATCH --nodes=1.                 # Request 1 node
 #SBATCH --tasks-per-node=1         # Set one task per node
 #SBATCH --cpus-per-task=2          # Request number of CPUs (threads) per task.
 #SBATCH --gres=gpu:1               # Request 1 GPU
-#SBATCH --mem=4GB                  # Request 4 GB of RAM in total
+#SBATCH --mem=8GB                  # Request 4 GB of RAM in total
 #SBATCH --mail-type=END            # Set mail type to 'END' to receive a mail when the job finishes. 
 #SBATCH --output=slurm-%x-%j.out   # Set name of output log. %j is the Slurm jobId
 #SBATCH --error=slurm-%x-%j.err    # Set name of error log. %j is the Slurm jobId
 
-export APPTAINER_IMAGE="\tudelft.net\staff-umbrella\eccmorl\essentially-contested-morl\run_code\gpipd_four_room.sif"
+export APPTAINER_IMAGE="/tudelft.net/staff-umbrella/eccmorl/essentially-contested-morl/image.sif"
 
 # Run script
 srun apptainer exec \
   --nv \
-  --env-file ~/.env \                 
+  --env-file ~/.env \
   -B $HOME:$HOME \
-  -B /tudelft.net/staff-umbrella/eccmorl/:/project-storage/ \
+  -B /tudelft.net/staff-umbrella/eccmorl/ \
+  --cwd /tudelft.net/staff-umbrella/eccmorl/essentially-contested-morl \
   $APPTAINER_IMAGE \
-  uv run python run_code/gpipd_four_room.py
+  /opt/venv/bin/python run_code/train_reach_goal.py --config scripts/config/firefighters_envelope.json
 
 # --nv binds NVIDIA libraries from the host (only if you use CUDA)
 # --env-file source additional environment variables from e.g. .env file (optional)

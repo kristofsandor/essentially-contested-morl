@@ -216,7 +216,6 @@ class Envelope(MOPolicy, MOAgent):
         self.final_homotopy_lambda = final_homotopy_lambda
         self.homotopy_decay_steps = homotopy_decay_steps
         self.use_hv = use_hv
-        # Accept a plain list (e.g. from a JSON config) or an array.
         self.ref_point = np.asarray(ref_point, dtype=np.float32)
         self.dirichlet_alpha = dirichlet_alpha
 
