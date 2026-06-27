@@ -29,6 +29,7 @@ from morl_baselines.common.weights import equally_spaced_weights
 from typing_extensions import override
 
 import wandb
+from agent.my_mo_agent import MyMOAgent
 from networks.qnet import CNNQNet
 
 
@@ -118,7 +119,7 @@ class QNet(nn.Module):
         )  # Batch size X Actions X Rewards
 
 
-class Envelope(MOPolicy, MOAgent):
+class Envelope(MOPolicy, MyMOAgent):
     """Envelope Q-Leaning Algorithm.
 
     Envelope uses a conditioned network to embed multiple policies (taking the weight as input).
@@ -159,7 +160,8 @@ class Envelope(MOPolicy, MOAgent):
         cnn_config: Optional[dict] = None,
         use_hv: bool = False,
         ref_point: np.ndarray = np.array([-100.0, -100.0]),
-        dirichlet_alpha = 0.8,
+        dirichlet_alpha=0.8,
+        algo_name="envelope",
     ):
         """Envelope Q-learning algorithm.
 
@@ -597,7 +599,7 @@ class Envelope(MOPolicy, MOAgent):
         Select the action with the highest hypervolume contribution given an observation.
         """
         return int(np.argmax(self.score_hypervolume(obs)))
-    
+
     @th.no_grad()
     def hv_best_weight(self, obs: th.Tensor) -> np.ndarray:
         """Select the weight whose greedy action has the highest hypervolume contribution."""
@@ -621,24 +623,28 @@ class Envelope(MOPolicy, MOAgent):
             [
                 hypervolume(
                     self.ref_point,
-                    list(get_non_dominated(set(map(tuple, q_set[k].cpu().numpy().tolist())))),
+                    list(
+                        get_non_dominated(
+                            set(map(tuple, q_set[k].cpu().numpy().tolist()))
+                        )
+                    ),
                 )
                 for k in range(self.num_sample_w)
             ]
         )
         best_k = int(np.argmin(hv_contributions))
         return sampled_w[best_k].cpu().numpy()
-    
+
     # def hv_weight_action(self, obs: th.Tensor, sampled_w: np.ndarray) -> int:
     #     """Pick the weight that contributes most to HV, then act greedily under it."""
     #     tensor_w = th.tensor(sampled_w).float().to(self.device)
     #     obs_stack = th.stack([obs] * len(sampled_w))
     #     q_vals = self.q_net(obs_stack, tensor_w).cpu().numpy()  # [K, A, R]
-        
+
     #     # For each weight, pick its greedy action
     #     scalarized = np.einsum("kr,kar->ka", sampled_w, q_vals)  # [K, A]
     #     best_actions = np.argmax(scalarized, axis=1)  # [K]
-        
+
     #     # Pick the weight whose greedy action contributes most to HV of the current front
     #     # (or simply the one with highest marginal HV contribution)
     #     # ... compute HV contributions per weight candidate ...
@@ -807,7 +813,11 @@ class Envelope(MOPolicy, MOAgent):
             w = self.hv_best_weight(obs)
         else:
             w = random_weights(
-                self.reward_dim, 1, dist="dirichlet", rng=self.np_random, alpha=self.dirichlet_alpha
+                self.reward_dim,
+                1,
+                dist="dirichlet",
+                rng=self.np_random,
+                alpha=self.dirichlet_alpha,
             )
 
         tensor_w = th.tensor(w).float().to(self.device)
@@ -872,7 +882,11 @@ class Envelope(MOPolicy, MOAgent):
                         w = self.hv_best_weight(obs)
                     else:
                         w = random_weights(
-                            self.reward_dim, 1, dist="dirichlet", rng=self.np_random, alpha=self.dirichlet_alpha
+                            self.reward_dim,
+                            1,
+                            dist="dirichlet",
+                            rng=self.np_random,
+                            alpha=self.dirichlet_alpha,
                         )
                     tensor_w = th.tensor(w).float().to(self.device)
 

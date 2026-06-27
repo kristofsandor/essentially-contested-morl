@@ -38,6 +38,8 @@ from morl_baselines.common.utils import linearly_decaying_value, unique_tol
 from morl_baselines.common.weights import equally_spaced_weights
 from morl_baselines.multi_policy.linear_support.linear_support import LinearSupport
 
+from agent.my_mo_agent import MyMOAgent
+
 def _patch_linear_support_exact_arithmetic() -> None:
     """Route ``LinearSupport.compute_corner_weights`` through pycddlib's exact
     (gmp/fraction) backend.
@@ -134,7 +136,7 @@ class QNet(nn.Module):
         return q_values.view(-1, self.action_dim, self.phi_dim)  # Batch size X Actions X Rewards
 
 
-class GPIPD(MOPolicy, MOAgent):
+class GPIPD(MOPolicy, MyMOAgent):
     """GPI-PD Algorithm.
 
     Sample-Efficient Multi-Objective Learning via Generalized Policy Improvement Prioritization

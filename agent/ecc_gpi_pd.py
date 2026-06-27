@@ -12,22 +12,31 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from morl_baselines.common.buffer import ReplayBuffer
-from morl_baselines.common.evaluation import (log_all_multi_policy_metrics,
-                                              log_episode_info,
-                                              policy_evaluation_mo)
-from morl_baselines.common.model_based.probabilistic_ensemble import \
-    ProbabilisticEnsemble
+from morl_baselines.common.evaluation import (
+    log_all_multi_policy_metrics,
+    log_episode_info,
+    policy_evaluation_mo,
+)
+from morl_baselines.common.model_based.probabilistic_ensemble import (
+    ProbabilisticEnsemble,
+)
 from morl_baselines.common.model_based.utils import ModelEnv, visualize_eval
 from morl_baselines.common.morl_algorithm import MOAgent, MOPolicy
-from morl_baselines.common.networks import (NatureCNN, get_grad_norm, huber,
-                                            layer_init, mlp, polyak_update)
+from morl_baselines.common.networks import (
+    NatureCNN,
+    get_grad_norm,
+    huber,
+    layer_init,
+    mlp,
+    polyak_update,
+)
 from morl_baselines.common.prioritized_buffer import PrioritizedReplayBuffer
 from morl_baselines.common.utils import linearly_decaying_value, unique_tol
 from morl_baselines.common.weights import equally_spaced_weights
-from morl_baselines.multi_policy.linear_support.linear_support import \
-    LinearSupport
+from morl_baselines.multi_policy.linear_support.linear_support import LinearSupport
 
 import wandb
+from agent.my_mo_agent import MyMOAgent
 from wrappers.matrix_to_vector import InterpWeightWrapper
 
 
@@ -70,7 +79,9 @@ def _patch_linear_support_exact_arithmetic() -> None:
         b = b.reshape((-1, 1))
 
         arr = np.hstack([b, -A])
-        arr_frac = [[Fraction(float(x)).limit_denominator(10**6) for x in row] for row in arr]
+        arr_frac = [
+            [Fraction(float(x)).limit_denominator(10**6) for x in row] for row in arr
+        ]
         mat = gmp.matrix_from_array(arr_frac, rep_type=cdd.RepType.INEQUALITY)
         poly = gmp.polyhedron_from_matrix(mat)
         gens = gmp.copy_generators(poly)
@@ -92,7 +103,16 @@ def _patch_linear_support_exact_arithmetic() -> None:
 class QNet(nn.Module):
     """Conditioned MO Q network."""
 
-    def __init__(self, obs_shape, action_dim, rew_dim, num_interp, net_arch, drop_rate=0.01, layer_norm=True):
+    def __init__(
+        self,
+        obs_shape,
+        action_dim,
+        rew_dim,
+        num_interp,
+        net_arch,
+        drop_rate=0.01,
+        layer_norm=True,
+    ):
         """Initialize the net.
 
         Args:
@@ -117,7 +137,11 @@ class QNet(nn.Module):
         elif len(obs_shape) > 1:  # Image observation
             self.state_features = NatureCNN(self.obs_shape, features_dim=net_arch[0])
         self.net = mlp(
-            net_arch[0], action_dim * rew_dim, net_arch[1:], drop_rate=drop_rate, layer_norm=layer_norm
+            net_arch[0],
+            action_dim * rew_dim,
+            net_arch[1:],
+            drop_rate=drop_rate,
+            layer_norm=layer_norm,
         )  # 128/128 256 256 256
 
         self.apply(layer_init)
@@ -128,10 +152,12 @@ class QNet(nn.Module):
         wf = self.weights_features(w)
         if_ = self.interp_features(interp_w)
         q_values = self.net(sf * wf * if_)
-        return q_values.view(-1, self.action_dim, self.phi_dim)  # Batch size X Actions X Rewards
+        return q_values.view(
+            -1, self.action_dim, self.phi_dim
+        )  # Batch size X Actions X Rewards
 
 
-class ECCGPIPD(MOPolicy, MOAgent):
+class ECCGPIPD(MOPolicy, MyMOAgent):
     """GPI-PD Algorithm.
 
     Sample-Efficient Multi-Objective Learning via Generalized Policy Improvement Prioritization
@@ -268,9 +294,9 @@ class ECCGPIPD(MOPolicy, MOAgent):
         # The env reward is a flattened [num_interp, net_reward_dim] matrix. The nets
         # and the GPI-LS objective weight ``w`` live in the net_reward_dim space; the
         # per-interpretation rows are collapsed into it via interp_w in the TD target.
-        assert self.reward_dim % self.num_interps == 0, (
-            f"reward_dim={self.reward_dim} not divisible by num_interps={self.num_interps}"
-        )
+        assert (
+            self.reward_dim % self.num_interps == 0
+        ), f"reward_dim={self.reward_dim} not divisible by num_interps={self.num_interps}"
         self.net_reward_dim = self.reward_dim // self.num_interps
 
         # Q-Networks
@@ -302,18 +328,28 @@ class ECCGPIPD(MOPolicy, MOAgent):
             target_q.load_state_dict(q.state_dict())
             for param in target_q.parameters():
                 param.requires_grad = False
-        self.q_optim = optim.Adam(chain(*[net.parameters() for net in self.q_nets]), lr=self.learning_rate)
+        self.q_optim = optim.Adam(
+            chain(*[net.parameters() for net in self.q_nets]), lr=self.learning_rate
+        )
 
         # Prioritized experience replay parameters
         self.per = per
         self.gpi_pd = gpi_pd
         if self.per:
             self.replay_buffer = PrioritizedReplayBuffer(
-                self.observation_shape, 1, rew_dim=self.reward_dim, max_size=buffer_size, action_dtype=np.uint8
+                self.observation_shape,
+                1,
+                rew_dim=self.reward_dim,
+                max_size=buffer_size,
+                action_dtype=np.uint8,
             )
         else:
             self.replay_buffer = ReplayBuffer(
-                self.observation_shape, 1, rew_dim=self.reward_dim, max_size=buffer_size, action_dtype=np.uint8
+                self.observation_shape,
+                1,
+                rew_dim=self.reward_dim,
+                max_size=buffer_size,
+                action_dtype=np.uint8,
             )
         self.min_priority = min_priority
         self.alpha = alpha_per
@@ -334,7 +370,11 @@ class ECCGPIPD(MOPolicy, MOAgent):
                 device=self.device,
             )
             self.dynamics_buffer = ReplayBuffer(
-                self.observation_shape, 1, rew_dim=self.reward_dim, max_size=dynamics_buffer_size, action_dtype=np.uint8
+                self.observation_shape,
+                1,
+                rew_dim=self.reward_dim,
+                max_size=dynamics_buffer_size,
+                action_dtype=np.uint8,
             )
         self.dynamics_train_freq = dynamics_train_freq
         self.dynamics_buffer_size = dynamics_buffer_size
@@ -352,7 +392,6 @@ class ECCGPIPD(MOPolicy, MOAgent):
         self.log = log
         if self.log:
             self.setup_wandb(project_name, experiment_name, wandb_entity)
-
 
     def get_config(self):
         """Return the configuration of the agent."""
@@ -411,7 +450,9 @@ class ECCGPIPD(MOPolicy, MOAgent):
     def load(self, path, load_replay_buffer=True):
         """Load the model parameters and the replay buffer."""
         params = th.load(path, map_location=self.device, weights_only=False)
-        for i, (psi_net, target_psi_net) in enumerate(zip(self.q_nets, self.target_q_nets)):
+        for i, (psi_net, target_psi_net) in enumerate(
+            zip(self.q_nets, self.target_q_nets)
+        ):
             psi_net.load_state_dict(params[f"psi_net_{i}_state_dict"])
             target_psi_net.load_state_dict(params[f"psi_net_{i}_state_dict"])
         self.q_optim.load_state_dict(params["psi_nets_optimizer_state_dict"])
@@ -422,20 +463,36 @@ class ECCGPIPD(MOPolicy, MOAgent):
             self.replay_buffer = params["replay_buffer"]
 
     def _sample_batch_experiences(self):
-        if not self.dyna or self.global_step < self.dynamics_rollout_starts or len(self.dynamics_buffer) == 0:
-            return self.replay_buffer.sample(self.batch_size, to_tensor=True, device=self.device)
+        if (
+            not self.dyna
+            or self.global_step < self.dynamics_rollout_starts
+            or len(self.dynamics_buffer) == 0
+        ):
+            return self.replay_buffer.sample(
+                self.batch_size, to_tensor=True, device=self.device
+            )
         else:
-            num_real_samples = int(self.batch_size * self.real_ratio)  # real_ratio% of real world data
+            num_real_samples = int(
+                self.batch_size * self.real_ratio
+            )  # real_ratio% of real world data
             if self.per:
-                s_obs, s_actions, s_rewards, s_next_obs, s_dones, idxes = self.replay_buffer.sample(
-                    num_real_samples, to_tensor=True, device=self.device
+                s_obs, s_actions, s_rewards, s_next_obs, s_dones, idxes = (
+                    self.replay_buffer.sample(
+                        num_real_samples, to_tensor=True, device=self.device
+                    )
                 )
             else:
-                s_obs, s_actions, s_rewards, s_next_obs, s_dones = self.replay_buffer.sample(
-                    num_real_samples, to_tensor=True, device=self.device
+                s_obs, s_actions, s_rewards, s_next_obs, s_dones = (
+                    self.replay_buffer.sample(
+                        num_real_samples, to_tensor=True, device=self.device
+                    )
                 )
-            m_obs, m_actions, m_rewards, m_next_obs, m_dones = self.dynamics_buffer.sample(
-                self.batch_size - num_real_samples, to_tensor=True, device=self.device
+            m_obs, m_actions, m_rewards, m_next_obs, m_dones = (
+                self.dynamics_buffer.sample(
+                    self.batch_size - num_real_samples,
+                    to_tensor=True,
+                    device=self.device,
+                )
             )
             experience_tuples = (
                 th.cat([s_obs, m_obs], dim=0),
@@ -456,7 +513,9 @@ class ECCGPIPD(MOPolicy, MOAgent):
         num_added_imagined_transitions = 0
         for iteration in range(num_times):
             obs = self.replay_buffer.sample_obs(batch_size, to_tensor=False)
-            model_env = ModelEnv(self.dynamics, self.env.unwrapped.spec.id, rew_dim=len(w))
+            model_env = ModelEnv(
+                self.dynamics, self.env.unwrapped.spec.id, rew_dim=len(w)
+            )
 
             for h in range(self.dynamics_rollout_len):
                 obs = th.tensor(obs).to(self.device)
@@ -465,19 +524,27 @@ class ECCGPIPD(MOPolicy, MOAgent):
                 obs_m = obs.unsqueeze(1).repeat(1, M.size(1), 1)
 
                 psi_values = self.q_nets[0](obs_m, M, self._interp_w_like(M, interp_w))
-                q_values = th.einsum("r,bar->ba", w, psi_values).view(obs.size(0), len(self.weight_support), self.action_dim)
+                q_values = th.einsum("r,bar->ba", w, psi_values).view(
+                    obs.size(0), len(self.weight_support), self.action_dim
+                )
                 max_q, ac = th.max(q_values, dim=2)
                 pi = th.argmax(max_q, dim=1)
                 actions = ac.gather(1, pi.unsqueeze(1))
-                actions_one_hot = F.one_hot(actions, num_classes=self.action_dim).squeeze(1)
+                actions_one_hot = F.one_hot(
+                    actions, num_classes=self.action_dim
+                ).squeeze(1)
 
-                next_obs_pred, r_pred, dones, info = model_env.step(obs, actions_one_hot, deterministic=False)
+                next_obs_pred, r_pred, dones, info = model_env.step(
+                    obs, actions_one_hot, deterministic=False
+                )
                 uncertainties = info["uncertainty"]
                 obs, actions = obs.cpu().numpy(), actions.cpu().numpy()
 
                 for i in range(len(obs)):
                     if uncertainties[i] < self.dynamics_uncertainty_threshold:
-                        self.dynamics_buffer.add(obs[i], actions[i], r_pred[i], next_obs_pred[i], dones[i])
+                        self.dynamics_buffer.add(
+                            obs[i], actions[i], r_pred[i], next_obs_pred[i], dones[i]
+                        )
                         num_added_imagined_transitions += 1
 
                 nonterm_mask = ~dones.squeeze(-1)
@@ -499,7 +566,9 @@ class ECCGPIPD(MOPolicy, MOAgent):
 
     def _sample_interp_w(self, n: Optional[int] = None) -> np.ndarray:
         """Sample interpretation weight(s) from a Dirichlet over the interp simplex."""
-        alpha = np.ones(self.num_interps, dtype=np.float64) * self.interp_dirichlet_alpha
+        alpha = (
+            np.ones(self.num_interps, dtype=np.float64) * self.interp_dirichlet_alpha
+        )
         if n is None:
             return self.np_random.dirichlet(alpha).astype(np.float32)
         return self.np_random.dirichlet(alpha, n).astype(np.float32)
@@ -524,19 +593,27 @@ class ECCGPIPD(MOPolicy, MOAgent):
         eval env inside ``train`` is built separately from ``self._eval_interp_w``.
         """
         iw = np.asarray(interp_w, dtype=np.float32)
-        assert iw.shape == (self.num_interps,), (
-            f"interp_w must have shape ({self.num_interps},), got {iw.shape}"
-        )
+        assert iw.shape == (
+            self.num_interps,
+        ), f"interp_w must have shape ({self.num_interps},), got {iw.shape}"
         self._eval_interp_w = iw
 
     def update(self, weight: th.Tensor):
         """Update the parameters of the networks."""
         critic_losses = []
-        for g in range(self.gradient_updates if self.global_step >= self.dynamics_rollout_starts else 1):
+        for g in range(
+            self.gradient_updates
+            if self.global_step >= self.dynamics_rollout_starts
+            else 1
+        ):
             if self.per:
-                s_obs, s_actions, s_rewards, s_next_obs, s_dones, idxes = self._sample_batch_experiences()
+                s_obs, s_actions, s_rewards, s_next_obs, s_dones, idxes = (
+                    self._sample_batch_experiences()
+                )
             else:
-                s_obs, s_actions, s_rewards, s_next_obs, s_dones = self._sample_batch_experiences()
+                s_obs, s_actions, s_rewards, s_next_obs, s_dones = (
+                    self._sample_batch_experiences()
+                )
 
             if len(self.weight_support) > 1:
                 s_obs, s_actions, s_rewards, s_next_obs, s_dones = (
@@ -548,14 +625,17 @@ class ECCGPIPD(MOPolicy, MOAgent):
                 )
                 # Half of the batch uses the given weight vector, the other half uses weights sampled from the support set
                 w = th.vstack(
-                    [weight for _ in range(s_obs.size(0) // 2)] + random.choices(self.weight_support, k=s_obs.size(0) // 2)
+                    [weight for _ in range(s_obs.size(0) // 2)]
+                    + random.choices(self.weight_support, k=s_obs.size(0) // 2)
                 )
             else:
                 w = weight.repeat(s_obs.size(0), 1)
 
             # Per-sample interpretation weights (random Dirichlet), conditioning the
             # nets the same way the objective weight ``w`` does.
-            interp_w = th.as_tensor(self._sample_interp_w(w.size(0)), device=self.device)
+            interp_w = th.as_tensor(
+                self._sample_interp_w(w.size(0)), device=self.device
+            )
 
             # Project the flattened [num_interp, net_reward_dim] env reward into the
             # net_reward_dim objective space via interp_w (weighted average). This is
@@ -574,12 +654,22 @@ class ECCGPIPD(MOPolicy, MOAgent):
             with th.no_grad():
                 # Compute min_i Q_i(s', a, w) . w
                 next_q_values = th.stack(
-                    [target_psi_net(s_next_obs, w, interp_w) for target_psi_net in self.target_q_nets]
+                    [
+                        target_psi_net(s_next_obs, w, interp_w)
+                        for target_psi_net in self.target_q_nets
+                    ]
                 )
-                scalarized_next_q_values = th.einsum("nbar,br->nba", next_q_values, w)  # q_i(s', a, w)
+                scalarized_next_q_values = th.einsum(
+                    "nbar,br->nba", next_q_values, w
+                )  # q_i(s', a, w)
                 min_inds = th.argmin(scalarized_next_q_values, dim=0)
-                min_inds = min_inds.reshape(1, next_q_values.size(1), next_q_values.size(2), 1).expand(
-                    1, next_q_values.size(1), next_q_values.size(2), next_q_values.size(3)
+                min_inds = min_inds.reshape(
+                    1, next_q_values.size(1), next_q_values.size(2), 1
+                ).expand(
+                    1,
+                    next_q_values.size(1),
+                    next_q_values.size(2),
+                    next_q_values.size(3),
                 )
                 next_q_values = next_q_values.gather(0, min_inds).squeeze(0)
 
@@ -588,14 +678,21 @@ class ECCGPIPD(MOPolicy, MOAgent):
                 max_acts = th.argmax(max_q, dim=1)
 
                 q_targets = next_q_values.gather(
-                    1, max_acts.long().reshape(-1, 1, 1).expand(next_q_values.size(0), 1, next_q_values.size(2))
+                    1,
+                    max_acts.long()
+                    .reshape(-1, 1, 1)
+                    .expand(next_q_values.size(0), 1, next_q_values.size(2)),
                 )
                 target_q = q_targets.reshape(-1, self.net_reward_dim)
                 target_q = s_rewards + (1 - s_dones) * self.gamma * target_q
 
                 if self.gpi_pd:
-                    target_q_envelope, _ = self._envelope_target(s_next_obs, w, sampled_w, interp_w)
-                    target_q_envelope = s_rewards + (1 - s_dones) * self.gamma * target_q_envelope
+                    target_q_envelope, _ = self._envelope_target(
+                        s_next_obs, w, sampled_w, interp_w
+                    )
+                    target_q_envelope = (
+                        s_rewards + (1 - s_dones) * self.gamma * target_q_envelope
+                    )
 
             losses = []
             td_errors = []
@@ -603,7 +700,10 @@ class ECCGPIPD(MOPolicy, MOAgent):
             for psi_net in self.q_nets:
                 psi_value = psi_net(s_obs, w, interp_w)
                 psi_value = psi_value.gather(
-                    1, s_actions.long().reshape(-1, 1, 1).expand(psi_value.size(0), 1, psi_value.size(2))
+                    1,
+                    s_actions.long()
+                    .reshape(-1, 1, 1)
+                    .expand(psi_value.size(0), 1, psi_value.size(2)),
                 )
                 psi_value = psi_value.reshape(-1, self.net_reward_dim)
 
@@ -626,12 +726,16 @@ class ECCGPIPD(MOPolicy, MOAgent):
                 if self.log and self.global_step % 100 == 0:
                     wandb.log(
                         {
-                            "losses/grad_norm": get_grad_norm(self.q_nets[0].parameters()).item(),
+                            "losses/grad_norm": get_grad_norm(
+                                self.q_nets[0].parameters()
+                            ).item(),
                             "global_step": self.global_step,
                         },
                     )
                 for psi_net in self.q_nets:
-                    th.nn.utils.clip_grad_norm_(psi_net.parameters(), self.max_grad_norm)
+                    th.nn.utils.clip_grad_norm_(
+                        psi_net.parameters(), self.max_grad_norm
+                    )
             self.q_optim.step()
             critic_losses.append(critic_loss.item())
 
@@ -657,11 +761,17 @@ class ECCGPIPD(MOPolicy, MOAgent):
 
         if self.tau != 1 or self.global_step % self.target_net_update_freq == 0:
             for psi_net, target_psi_net in zip(self.q_nets, self.target_q_nets):
-                polyak_update(psi_net.parameters(), target_psi_net.parameters(), self.tau)
+                polyak_update(
+                    psi_net.parameters(), target_psi_net.parameters(), self.tau
+                )
 
         if self.epsilon_decay_steps is not None:
             self.epsilon = linearly_decaying_value(
-                self.initial_epsilon, self.epsilon_decay_steps, self.global_step, self.learning_starts, self.final_epsilon
+                self.initial_epsilon,
+                self.epsilon_decay_steps,
+                self.global_step,
+                self.learning_starts,
+                self.final_epsilon,
             )
 
         if self.log and self.global_step % 100 == 0:
@@ -680,7 +790,10 @@ class ECCGPIPD(MOPolicy, MOAgent):
                         "metrics/mean_gpriority": np.mean(gpriority),
                         "metrics/max_gpriority": np.max(gpriority),
                         "metrics/mean_gtd_error_w": gper.abs().mean().item(),
-                        "metrics/mean_absolute_diff_gtd_td": (gper - per).abs().mean().item(),
+                        "metrics/mean_absolute_diff_gtd_td": (gper - per)
+                        .abs()
+                        .mean()
+                        .item(),
                     },
                     commit=False,
                 )
@@ -693,7 +806,14 @@ class ECCGPIPD(MOPolicy, MOAgent):
             )
 
     @th.no_grad()
-    def gpi_action(self, obs: th.Tensor, w: th.Tensor, interp_w: th.Tensor, return_policy_index=False, include_w=False):
+    def gpi_action(
+        self,
+        obs: th.Tensor,
+        w: th.Tensor,
+        interp_w: th.Tensor,
+        return_policy_index=False,
+        include_w=False,
+    ):
         """Select an action using GPI."""
         if include_w:
             M = th.stack(self.weight_support + [w])
@@ -703,7 +823,9 @@ class ECCGPIPD(MOPolicy, MOAgent):
         obs_m = obs.repeat(M.size(0), *(1 for _ in range(obs.dim())))
         q_values = self.q_nets[0](obs_m, M, self._interp_w_like(M, interp_w))
 
-        scalar_q_values = th.einsum("r,bar->ba", w, q_values)  # q(s,a,w_i) = q(s,a,w_i) . w
+        scalar_q_values = th.einsum(
+            "r,bar->ba", w, q_values
+        )  # q(s,a,w_i) = q(s,a,w_i) . w
         max_q, a = th.max(scalar_q_values, dim=1)
         policy_index = th.argmax(max_q)  # max_i max_a q(s,a,w_i)
         action = a[policy_index].detach().item()
@@ -713,7 +835,9 @@ class ECCGPIPD(MOPolicy, MOAgent):
         return action
 
     @th.no_grad()
-    def eval(self, obs: np.ndarray, w: np.ndarray, interp_w: Optional[np.ndarray] = None) -> int:
+    def eval(
+        self, obs: np.ndarray, w: np.ndarray, interp_w: Optional[np.ndarray] = None
+    ) -> int:
         """Select an action for the given obs and weight vector.
 
         ``interp_w`` defaults to the eval reference ``self._eval_interp_w`` so that
@@ -752,7 +876,9 @@ class ECCGPIPD(MOPolicy, MOAgent):
     def max_action(self, obs: th.Tensor, w: th.Tensor, interp_w=None) -> int:
         """Select the greedy action."""
         iw = self._interp_w_like(w, interp_w)
-        psi = th.min(th.stack([psi_net(obs, w, iw) for psi_net in self.q_nets]), dim=0)[0]
+        psi = th.min(th.stack([psi_net(obs, w, iw) for psi_net in self.q_nets]), dim=0)[
+            0
+        ]
         # psi = self.psi_nets[0](obs, w)
         q = th.einsum("r,bar->ba", w, psi)
         max_act = th.argmax(q, dim=1)
@@ -773,7 +899,13 @@ class ECCGPIPD(MOPolicy, MOAgent):
         for i in range(num_batches):
             b = i * 1000
             e = min((i + 1) * 1000, obs_s.shape[0])
-            obs, actions, rewards, next_obs, dones = obs_s[b:e], actions_s[b:e], rewards_s[b:e], next_obs_s[b:e], dones_s[b:e]
+            obs, actions, rewards, next_obs, dones = (
+                obs_s[b:e],
+                actions_s[b:e],
+                rewards_s[b:e],
+                next_obs_s[b:e],
+                dones_s[b:e],
+            )
             obs, actions, rewards, next_obs, dones = (
                 th.tensor(obs).to(self.device),
                 th.tensor(actions).to(self.device),
@@ -785,10 +917,17 @@ class ECCGPIPD(MOPolicy, MOAgent):
             iw_b = self._interp_w_like(w_b)
             # Project the flattened env reward into net_reward_dim at the eval interp_w.
             rewards = th.einsum(
-                "ni,nir->nr", iw_b, rewards.view(-1, self.num_interps, self.net_reward_dim)
+                "ni,nir->nr",
+                iw_b,
+                rewards.view(-1, self.num_interps, self.net_reward_dim),
             )
             q_values = self.q_nets[0](obs, w_b, iw_b)
-            q_a = q_values.gather(1, actions.long().reshape(-1, 1, 1).expand(q_values.size(0), 1, q_values.size(2))).squeeze(1)
+            q_a = q_values.gather(
+                1,
+                actions.long()
+                .reshape(-1, 1, 1)
+                .expand(q_values.size(0), 1, q_values.size(2)),
+            ).squeeze(1)
 
             if self.gpi_pd:
                 max_next_q, _ = self._envelope_target(
@@ -800,33 +939,57 @@ class ECCGPIPD(MOPolicy, MOAgent):
                 max_acts = th.argmax(max_q, dim=1)
                 q_targets = self.target_q_nets[0](next_obs, w_b, iw_b)
                 q_targets = q_targets.gather(
-                    1, max_acts.long().reshape(-1, 1, 1).expand(q_targets.size(0), 1, q_targets.size(2))
+                    1,
+                    max_acts.long()
+                    .reshape(-1, 1, 1)
+                    .expand(q_targets.size(0), 1, q_targets.size(2)),
                 )
                 max_next_q = q_targets.reshape(-1, self.net_reward_dim)
 
-            gtderror = th.einsum("r,br->b", w, (rewards + (1 - dones) * self.gamma * max_next_q - q_a)).abs()
-            priorities[b:e] = gtderror.clamp(min=self.min_priority).pow(self.alpha).cpu().detach().numpy().flatten()
+            gtderror = th.einsum(
+                "r,br->b", w, (rewards + (1 - dones) * self.gamma * max_next_q - q_a)
+            ).abs()
+            priorities[b:e] = (
+                gtderror.clamp(min=self.min_priority)
+                .pow(self.alpha)
+                .cpu()
+                .detach()
+                .numpy()
+                .flatten()
+            )
 
         self.replay_buffer.update_priorities(inds, priorities)
 
     @th.no_grad()
-    def _envelope_target(self, obs: th.Tensor, w: th.Tensor, sampled_w: th.Tensor, interp_w: th.Tensor):
+    def _envelope_target(
+        self, obs: th.Tensor, w: th.Tensor, sampled_w: th.Tensor, interp_w: th.Tensor
+    ):
         W = sampled_w.unsqueeze(0).repeat(obs.size(0), 1, 1)
         # interp_w is [N, num_interp]; broadcast across the sampled-weight axis.
-        IW = interp_w.unsqueeze(1).expand(obs.size(0), sampled_w.size(0), self.num_interps)
+        IW = interp_w.unsqueeze(1).expand(
+            obs.size(0), sampled_w.size(0), self.num_interps
+        )
         next_obs = obs.unsqueeze(1).repeat(1, sampled_w.size(0), 1)
 
         next_q_target = th.stack(
             [
-                target_net(next_obs, W, IW).view(obs.size(0), sampled_w.size(0), self.action_dim, self.net_reward_dim)
+                target_net(next_obs, W, IW).view(
+                    obs.size(0), sampled_w.size(0), self.action_dim, self.net_reward_dim
+                )
                 for target_net in self.target_q_nets
             ]
         )
 
         q_values = th.einsum("br,nbpar->nbpa", w, next_q_target)
         min_inds = th.argmin(q_values, dim=0)
-        min_inds = min_inds.reshape(1, next_q_target.size(1), next_q_target.size(2), next_q_target.size(3), 1).expand(
-            1, next_q_target.size(1), next_q_target.size(2), next_q_target.size(3), next_q_target.size(4)
+        min_inds = min_inds.reshape(
+            1, next_q_target.size(1), next_q_target.size(2), next_q_target.size(3), 1
+        ).expand(
+            1,
+            next_q_target.size(1),
+            next_q_target.size(2),
+            next_q_target.size(3),
+            next_q_target.size(4),
         )
         next_q_target = next_q_target.gather(0, min_inds).squeeze(0)
 
@@ -836,15 +999,23 @@ class ECCGPIPD(MOPolicy, MOAgent):
 
         max_next_q = next_q_target.gather(
             2,
-            ac.unsqueeze(2).unsqueeze(3).expand(next_q_target.size(0), next_q_target.size(1), 1, next_q_target.size(3)),
+            ac.unsqueeze(2)
+            .unsqueeze(3)
+            .expand(
+                next_q_target.size(0), next_q_target.size(1), 1, next_q_target.size(3)
+            ),
         ).squeeze(2)
-        max_next_q = max_next_q.gather(1, pi.reshape(-1, 1, 1).expand(max_next_q.size(0), 1, max_next_q.size(2))).squeeze(1)
+        max_next_q = max_next_q.gather(
+            1, pi.reshape(-1, 1, 1).expand(max_next_q.size(0), 1, max_next_q.size(2))
+        ).squeeze(1)
         return max_next_q, next_q_target
 
     def set_weight_support(self, weight_list: List[np.ndarray]):
         """Set the weight support set."""
         weights_no_repeats = unique_tol(weight_list)
-        self.weight_support = [th.tensor(w).float().to(self.device) for w in weights_no_repeats]
+        self.weight_support = [
+            th.tensor(w).float().to(self.device) for w in weights_no_repeats
+        ]
 
     def train_iteration(
         self,
@@ -884,7 +1055,9 @@ class ECCGPIPD(MOPolicy, MOAgent):
         if self.per and len(self.replay_buffer) > 0:
             self._reset_priorities(tensor_w)
 
-        def _scalarize_episode_return(episode_return: np.ndarray, scalar_weight: np.ndarray) -> float:
+        def _scalarize_episode_return(
+            episode_return: np.ndarray, scalar_weight: np.ndarray
+        ) -> float:
             """Scalarize either a net-reward vector or a flattened ECC reward matrix.
 
             ECCReachGoalEnv emits rewards as a flattened [num_interp, net_reward_dim]
@@ -898,12 +1071,21 @@ class ECCGPIPD(MOPolicy, MOAgent):
             if episode_return.shape == scalar_weight.shape:
                 return float(np.dot(episode_return, scalar_weight))
 
-            if episode_return.size == self.reward_dim and self.reward_dim == self.num_interps * self.net_reward_dim:
-                reward_matrix = episode_return.reshape(self.num_interps, self.net_reward_dim)
+            if (
+                episode_return.size == self.reward_dim
+                and self.reward_dim == self.num_interps * self.net_reward_dim
+            ):
+                reward_matrix = episode_return.reshape(
+                    self.num_interps, self.net_reward_dim
+                )
                 projected_return = np.array(
                     [
                         reward_matrix[0, 0],
-                        float(np.dot(tensor_iw.detach().cpu().numpy(), reward_matrix[:, 1])),
+                        float(
+                            np.dot(
+                                tensor_iw.detach().cpu().numpy(), reward_matrix[:, 1]
+                            )
+                        ),
                     ],
                     dtype=np.float32,
                 )
@@ -920,7 +1102,9 @@ class ECCGPIPD(MOPolicy, MOAgent):
             if self.global_step < self.learning_starts:
                 action = self.env.action_space.sample()
             else:
-                action = self._act(th.as_tensor(obs).float().to(self.device), tensor_w, tensor_iw)
+                action = self._act(
+                    th.as_tensor(obs).float().to(self.device), tensor_w, tensor_iw
+                )
 
             next_obs, vec_reward, terminated, truncated, info = self.env.step(action)
 
@@ -928,19 +1112,33 @@ class ECCGPIPD(MOPolicy, MOAgent):
 
             if self.global_step >= self.learning_starts:
                 if self.dyna:
-                    if self.global_step % self.dynamics_train_freq(self.global_step) == 0:
-                        m_obs, m_actions, m_rewards, m_next_obs, m_dones = self.replay_buffer.get_all_data()
+                    if (
+                        self.global_step % self.dynamics_train_freq(self.global_step)
+                        == 0
+                    ):
+                        m_obs, m_actions, m_rewards, m_next_obs, m_dones = (
+                            self.replay_buffer.get_all_data()
+                        )
                         one_hot = np.zeros((len(m_obs), self.action_dim))
-                        one_hot[np.arange(len(m_obs)), m_actions.astype(int).reshape(len(m_obs))] = 1
+                        one_hot[
+                            np.arange(len(m_obs)),
+                            m_actions.astype(int).reshape(len(m_obs)),
+                        ] = 1
                         X = np.hstack((m_obs, one_hot))
                         Y = np.hstack((m_rewards, m_next_obs - m_obs))
                         mean_holdout_loss = self.dynamics.fit(X, Y)
                         if self.log:
                             wandb.log(
-                                {"dynamics/mean_holdout_loss": mean_holdout_loss, "global_step": self.global_step},
+                                {
+                                    "dynamics/mean_holdout_loss": mean_holdout_loss,
+                                    "global_step": self.global_step,
+                                },
                             )
 
-                    if self.global_step >= self.dynamics_rollout_starts and self.global_step % self.dynamics_rollout_freq == 0:
+                    if (
+                        self.global_step >= self.dynamics_rollout_starts
+                        and self.global_step % self.dynamics_rollout_freq == 0
+                    ):
                         self._rollout_dynamics(tensor_w, tensor_iw)
 
                 self.update(tensor_w)
@@ -949,8 +1147,20 @@ class ECCGPIPD(MOPolicy, MOAgent):
                 self.policy_eval(eval_env, weights=weight, log=self.log)
 
                 if self.dyna and self.global_step >= self.dynamics_rollout_starts:
-                    plot = visualize_eval(self, eval_env, self.dynamics, weight, compound=False, horizon=1000)
-                    wandb.log({"dynamics/predictions": wandb.Image(plot), "global_step": self.global_step})
+                    plot = visualize_eval(
+                        self,
+                        eval_env,
+                        self.dynamics,
+                        weight,
+                        compound=False,
+                        horizon=1000,
+                    )
+                    wandb.log(
+                        {
+                            "dynamics/predictions": wandb.Image(plot),
+                            "global_step": self.global_step,
+                        }
+                    )
                     plot.close()
 
             if terminated or truncated:
@@ -958,14 +1168,24 @@ class ECCGPIPD(MOPolicy, MOAgent):
                 self.num_episodes += 1
 
                 if self.log and "episode" in info.keys():
-                    log_episode_info(info["episode"], _scalarize_episode_return, weight, self.global_step)
+                    log_episode_info(
+                        info["episode"],
+                        _scalarize_episode_return,
+                        weight,
+                        self.global_step,
+                    )
                     wandb.log(
-                        {"metrics/policy_index": np.array(self.police_indices), "global_step": self.global_step},
+                        {
+                            "metrics/policy_index": np.array(self.police_indices),
+                            "global_step": self.global_step,
+                        },
                     )
                     self.police_indices = []
 
                 # Resample the interpretation weight every episode (random Dirichlet).
-                tensor_iw = th.as_tensor(self._sample_interp_w()).float().to(self.device)
+                tensor_iw = (
+                    th.as_tensor(self._sample_interp_w()).float().to(self.device)
+                )
                 if change_w_every_episode:
                     weight = random.choice(weight_support)
                     tensor_w = th.tensor(weight).float().to(self.device)
@@ -1026,12 +1246,15 @@ class ECCGPIPD(MOPolicy, MOAgent):
         # eval interp weight.
         proj_eval_env = InterpWeightWrapper(eval_env, self._eval_interp_w)
         linear_support = LinearSupport(
-            num_objectives=self.net_reward_dim, epsilon=0.0 if weight_selection_algo == "ols" else None
+            num_objectives=self.net_reward_dim,
+            epsilon=0.0 if weight_selection_algo == "ols" else None,
         )
 
         weight_history = []
 
-        eval_weights = equally_spaced_weights(self.net_reward_dim, n=num_eval_weights_for_front)
+        eval_weights = equally_spaced_weights(
+            self.net_reward_dim, n=num_eval_weights_for_front
+        )
 
         for iter in range(1, max_iter + 1):
             if weight_selection_algo == "ols" or weight_selection_algo == "gpi-ls":
@@ -1040,7 +1263,10 @@ class ECCGPIPD(MOPolicy, MOAgent):
                     use_gpi = self.use_gpi
                     self.use_gpi = True
                     w = linear_support.next_weight(
-                        algo="gpi-ls", gpi_agent=self, env=proj_eval_env, rep_eval=num_eval_episodes_for_front
+                        algo="gpi-ls",
+                        gpi_agent=self,
+                        env=proj_eval_env,
+                        rep_eval=num_eval_episodes_for_front,
                     )
                     self.use_gpi = use_gpi
                 else:
@@ -1054,7 +1280,11 @@ class ECCGPIPD(MOPolicy, MOAgent):
             print("Next weight vector:", w)
             weight_history.append(w)
             if weight_selection_algo == "gpi-ls":
-                M = linear_support.get_weight_support() + linear_support.get_corner_weights(top_k=4) + [w]
+                M = (
+                    linear_support.get_weight_support()
+                    + linear_support.get_corner_weights(top_k=4)
+                    + [w]
+                )
             elif weight_selection_algo == "ols":
                 M = linear_support.get_weight_support() + [w]
             else:
@@ -1072,17 +1302,24 @@ class ECCGPIPD(MOPolicy, MOAgent):
             )
 
             if weight_selection_algo == "ols":
-                value = policy_evaluation_mo(self, proj_eval_env, w, rep=num_eval_episodes_for_front)[3]
+                value = policy_evaluation_mo(
+                    self, proj_eval_env, w, rep=num_eval_episodes_for_front
+                )[3]
                 linear_support.add_solution(value, w)
             elif weight_selection_algo == "gpi-ls":
                 for wcw in M:
-                    n_value = policy_evaluation_mo(self, proj_eval_env, wcw, rep=num_eval_episodes_for_front)[3]
+                    n_value = policy_evaluation_mo(
+                        self, proj_eval_env, wcw, rep=num_eval_episodes_for_front
+                    )[3]
                     linear_support.add_solution(n_value, wcw)
 
             if self.log and self.global_step % eval_mo_freq == 0:
                 # Evaluation
                 gpi_returns_test_tasks = [
-                    policy_evaluation_mo(self, proj_eval_env, ew, rep=num_eval_episodes_for_front)[3] for ew in eval_weights
+                    policy_evaluation_mo(
+                        self, proj_eval_env, ew, rep=num_eval_episodes_for_front
+                    )[3]
+                    for ew in eval_weights
                 ]
                 log_all_multi_policy_metrics(
                     current_front=gpi_returns_test_tasks,
@@ -1094,12 +1331,24 @@ class ECCGPIPD(MOPolicy, MOAgent):
                 )
                 # This is the EU computed in the paper
                 mean_gpi_returns_test_tasks = np.mean(
-                    [np.dot(ew, q) for ew, q in zip(eval_weights, gpi_returns_test_tasks)], axis=0
+                    [
+                        np.dot(ew, q)
+                        for ew, q in zip(eval_weights, gpi_returns_test_tasks)
+                    ],
+                    axis=0,
                 )
-                wandb.log({"eval/Mean Utility - GPI": mean_gpi_returns_test_tasks, "iteration": iter})
+                wandb.log(
+                    {
+                        "eval/Mean Utility - GPI": mean_gpi_returns_test_tasks,
+                        "iteration": iter,
+                    }
+                )
 
             if iter % (max_iter // num_checkpoints) == 0:
-                self.save(filename=f"GPI-PD {weight_selection_algo} iter={iter}", save_replay_buffer=False)
+                self.save(
+                    filename=f"GPI-PD {weight_selection_algo} iter={iter}",
+                    save_replay_buffer=False,
+                )
 
 
 class GPILS(ECCGPIPD):

@@ -29,6 +29,13 @@ import numpy as np
 from gymnasium import spaces
 
 from env.firefighters_env_mo import FeatureSelectionFFEnv, FireFightersEnvMO
+from use_cases.firefighters_use_case.constants import (
+    ACTION_AGGRESSIVE_FIRE_SUPPRESSION,
+    ACTION_ASSESS_AND_PLAN,
+    ACTION_CONTAIN_FIRE,
+    ACTION_COORDINATE_WITH_OTHER_AGENCIES,
+    ACTION_EVACUATE_OCCUPANTS,
+)
 
 # A per-value interpretation spec is either a named mode or a callable that maps
 # a base (S, A) reward matrix to a regrounded (S, A) matrix of the same shape.
@@ -52,11 +59,146 @@ def _idealist(base: np.ndarray) -> np.ndarray:
     return out
 
 
+def _by_action(mapping: dict, n_actions: int = 5) -> np.ndarray:
+    """Build a length-n_actions reward vector from an {action_id: reward} map."""
+    arr = np.zeros(n_actions, dtype=np.float32)
+    for action_id, value in mapping.items():
+        arr[action_id] = value
+    return arr
+
+
+def _per_action(rewards: np.ndarray) -> Callable[[np.ndarray], np.ndarray]:
+    """Grounding that assigns a fixed reward per action, then reapplies penalties.
+
+    Each action gets a flat reward from ``rewards`` in every state. The hard
+    override penalty of the underlying value (cells the base grounding forces to
+    -1.0: nonsensical actions and firefighter incapacitation) is then stamped
+    back on, so all interpretations share the exact same guardrails and only
+    contest the positive region.
+    """
+    rewards = np.asarray(rewards, dtype=np.float32)
+
+    def fn(base: np.ndarray) -> np.ndarray:
+        out = np.broadcast_to(rewards, base.shape).astype(np.float32).copy()
+        out[np.isclose(base, -1.0)] = -1.0
+        return out
+
+    return fn
+
+
+# Two rival readings of professionalism. Rescue-first rewards getting people out;
+# fire-control-first rewards extinguishing/containing the blaze. Coordinate and
+# assess are professional under either doctrine, so they are shared.
+_PF_RESCUE = _per_action(
+    _by_action(
+        {
+            ACTION_EVACUATE_OCCUPANTS: 1.0,
+            ACTION_CONTAIN_FIRE: 0.5,
+            ACTION_AGGRESSIVE_FIRE_SUPPRESSION: 0.3,
+            ACTION_COORDINATE_WITH_OTHER_AGENCIES: 0.6,
+            ACTION_ASSESS_AND_PLAN: 0.5,
+        }
+    )
+)
+_PF_FIRE = _per_action(
+    _by_action(
+        {
+            ACTION_EVACUATE_OCCUPANTS: 0.3,
+            ACTION_CONTAIN_FIRE: 1.0,
+            ACTION_AGGRESSIVE_FIRE_SUPPRESSION: 0.7,
+            ACTION_COORDINATE_WITH_OTHER_AGENCIES: 0.6,
+            ACTION_ASSESS_AND_PLAN: 0.5,
+        }
+    )
+)
+
+# Two rival readings of proximity. To-people rewards being with the occupants;
+# to-fire rewards being on the blaze. Both keep the deliberative actions
+# (coordinate, assess) negative, which is what keeps proximity distinct from
+# professionalism rather than collinear with it.
+_PX_PEOPLE = _per_action(
+    _by_action(
+        {
+            ACTION_EVACUATE_OCCUPANTS: 1.0,
+            ACTION_CONTAIN_FIRE: 0.2,
+            ACTION_AGGRESSIVE_FIRE_SUPPRESSION: 0.3,
+            ACTION_COORDINATE_WITH_OTHER_AGENCIES: -0.1,
+            ACTION_ASSESS_AND_PLAN: -0.3,
+        }
+    )
+)
+_PX_FIRE = _per_action(
+    _by_action(
+        {
+            ACTION_EVACUATE_OCCUPANTS: 0.2,
+            ACTION_CONTAIN_FIRE: 0.6,
+            ACTION_AGGRESSIVE_FIRE_SUPPRESSION: 1.0,
+            ACTION_COORDINATE_WITH_OTHER_AGENCIES: -0.1,
+            ACTION_ASSESS_AND_PLAN: -0.3,
+        }
+    )
+)
+
+
 _NAMED_MODES = {
     "graded": _graded,
     "default": _graded,
     "idealist": _idealist,
     "strict": _idealist,
+    # action-based rival readings (see tables / docstring)
+    "pf_rescue": _PF_RESCUE,
+    "pf_fire": _PF_FIRE,
+    "px_people": _PX_PEOPLE,
+    "px_fire": _PX_FIRE,
+}
+
+
+# Ready-made interpretation sets. Each maps to (interpretations, labels). Pass
+# the name to ``ECCFireFightersEnvMO.from_preset``.
+INTERPRETATION_PRESETS = {
+    # original graded vs strict/idealist reading of both values
+    "graded_vs_idealist": (
+        [("graded", "graded"), ("idealist", "idealist")],
+        ["graded", "idealist"],
+    ),
+    # contest professionalism only; proximity held at the graded ground truth
+    "professionalism_contest": (
+        [("pf_rescue", "graded"), ("pf_fire", "graded")],
+        ["rescue_pro", "fire_pro"],
+    ),
+    # contest proximity only; professionalism held at the graded ground truth
+    "proximity_contest": (
+        [("graded", "px_people"), ("graded", "px_fire")],
+        ["people_prox", "fire_prox"],
+    ),
+    # two internally coherent stances: rescue-minded vs fire-minded
+    "rescue_vs_fire": (
+        [("pf_rescue", "px_people"), ("pf_fire", "px_fire")],
+        ["rescue_minded", "fire_minded"],
+    ),
+    # maximally tense pairing: manner and target pull opposite ways
+    "crossed": (
+        [("pf_rescue", "px_fire"), ("pf_fire", "px_people")],
+        ["rescue_pro_fire_prox", "fire_pro_people_prox"],
+    ),
+    # all five readings together, for overlaying every Pareto front in one figure.
+    # Intended for analysis / front plotting rather than training (num_interps = 5).
+    "all_five": (
+        [
+            ("graded", "graded"),
+            ("pf_rescue", "px_people"),
+            ("pf_fire", "px_fire"),
+            ("pf_rescue", "px_fire"),
+            ("pf_fire", "px_people"),
+        ],
+        [
+            "graded",
+            "rescue_minded",
+            "fire_minded",
+            "crossed_rescuePF_firePX",
+            "crossed_firePF_peoplePX",
+        ],
+    ),
 }
 
 
@@ -147,4 +289,24 @@ class ECCFireFightersEnvMO(FireFightersEnvMO):
             low=flat.min(axis=0).astype(np.float32),
             high=flat.max(axis=0).astype(np.float32),
             dtype=np.float32,
+        )
+
+    @classmethod
+    def from_preset(cls, preset: str, **kwargs) -> "ECCFireFightersEnvMO":
+        """Build the env from a named entry in ``INTERPRETATION_PRESETS``.
+
+        Example:
+            env = ECCFireFightersEnvMO.from_preset("rescue_vs_fire", horizon=50)
+        """
+        try:
+            interpretations, labels = INTERPRETATION_PRESETS[preset]
+        except KeyError as exc:
+            raise ValueError(
+                f"Unknown preset {preset!r}. "
+                f"Available: {sorted(INTERPRETATION_PRESETS)}."
+            ) from exc
+        return cls(
+            interpretations=interpretations,
+            interpretation_labels=labels,
+            **kwargs,
         )

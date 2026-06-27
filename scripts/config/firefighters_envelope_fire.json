@@ -1,0 +1,53 @@
+{
+    "general": {
+        "use_ecc": false,
+        "eval_both_interps": false
+    },
+    "env": {
+        "id": "firefighters-mo-ecc-v0",
+        "horizon": 50,
+        "interpretations": [
+            ["pf_rescue", "px_people"],
+            ["pf_fire", "px_fire"]
+        ],
+        "interpretation_labels": ["rescue_minded", "fire_minded"],
+        "interp_index": 1
+    },
+    "train": {
+        "total_timesteps": 200000,
+        "eval_freq": 25000,
+        "num_eval_weights_for_front": 25,
+        "num_eval_episodes_for_front": 5,
+        "num_eval_weights_for_eval": 25,
+        "verbose": false,
+        "num_checkpoints": 3,
+        "out_dir": "results/reach_goal/pareto_front_small"
+    },
+    "eval": {
+        "num_eval_episodes": 50,
+        "num_eval_weights": 50
+    },
+    "agent": {
+        "ref_point": [0.0, 0.0],
+        "algorithm": "envelope",
+        "seed": 42,
+        "learning_rate": 3e-4,
+        "initial_epsilon": 1.0,
+        "final_epsilon": 0.0,
+        "epsilon_decay_steps": 100000,
+        "net_arch": [
+            128,
+            128,
+            128
+        ],
+        "batch_size": 128,
+        "learning_starts": 500,
+        "gradient_updates": 1,
+        "target_net_update_freq": 500,
+        "envelope": true,
+        "per": true,
+        "num_sample_w": 5,
+        "log": true,
+        "experiment_name": "firefighters_envelope_fire"
+    }
+}

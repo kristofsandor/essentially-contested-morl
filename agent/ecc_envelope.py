@@ -29,6 +29,7 @@ from morl_baselines.common.weights import equally_spaced_weights
 from typing_extensions import override
 
 import wandb
+from agent.my_mo_agent import MyMOAgent
 from networks.qnet import CNNQNet
 
 
@@ -129,7 +130,7 @@ class QNetEnsemble(nn.ModuleList):
         return th.stack([q_net(obs, w) for q_net in self])
 
 
-class ECCEnvelope(MOPolicy, MOAgent):
+class ECCEnvelope(MOPolicy, MyMOAgent):
     """Envelope Q-Leaning Algorithm.
 
     Envelope uses a conditioned network to embed multiple policies (taking the weight as input).

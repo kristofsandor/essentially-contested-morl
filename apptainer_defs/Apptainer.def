@@ -21,7 +21,7 @@ From: ubuntu:22.04
     # dependencies
     uv pip install pycddlib-standalone
     uv pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-    uv pip install gymnasium mo-gymnasium tqdm numpy matplotlib pymoo wandb \
+    uv pip install gymnasium mo-gymnasium tqdm numpy matplotlib pymoo wandb seals \
         ipywidgets cvxpy fire imageio moviepy pygame scipy seaborn sortedcontainers
     uv pip install git+https://github.com/LucasAlegre/morl-baselines.git --no-deps
 

@@ -22,7 +22,7 @@ srun apptainer exec \
   -B /tudelft.net/staff-umbrella/eccmorl/ \
   --cwd /tudelft.net/staff-umbrella/eccmorl/essentially-contested-morl \
   $APPTAINER_IMAGE \
-  /opt/venv/bin/python run_code/train_reach_goal.py --config scripts/config/firefighters_envelope.json
+  /opt/venv/bin/python scripts/train_reach_goal.py --config scripts/config/firefighters_envelope.json
 
 # --nv binds NVIDIA libraries from the host (only if you use CUDA)
 # --env-file source additional environment variables from e.g. .env file (optional)
