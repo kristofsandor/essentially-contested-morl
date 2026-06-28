@@ -11,7 +11,7 @@ from scripts.utils import find_model_path, interp_label_list, make_agent, make_e
 from morl_baselines.common.pareto import get_non_pareto_dominated_inds
 from morl_baselines.common.weights import equally_spaced_weights
 
-COMPONENT_NAMES = ["task", "help"]
+COMPONENT_NAMES = ["professionalism", "proximity"]
 
 
 def wrapped_reward_space(env):
@@ -259,13 +259,12 @@ def plot_eval(
             )
 
         fig, ax = plt.subplots(figsize=(5.0, 5.0))
-        ax.scatter(data[:, i], data[:, j], s=30, zorder=3, color="steelblue", label="evaluated")
-        ax.scatter(pf[:, i], pf[:, j], s=50, zorder=4, color="red", label="pareto front")
+        # all evaluated points, dimmed into the background
+        ax.scatter(data[:, i], data[:, j], s=20, alpha=0.3, zorder=3, color="steelblue", label="evaluated")
+        # connect the pareto front, sorted along the x-axis objective
+        order = np.argsort(pf[:, i])
+        ax.plot(pf[order, i], pf[order, j], marker="o", zorder=4, color="red", label="pareto front")
         ax.legend(fontsize=8)
-        for w_idx, w in enumerate(weights):
-            w = np.asarray(w).ravel()
-            ann = ",".join(f"{v:.2f}" for v in w[:2])
-            ax.annotate(f"({ann})", (data[w_idx, i], data[w_idx, j]), fontsize=7, alpha=0.75)
 
         ax.set_xlabel(obj_names[i])
         ax.set_ylabel(obj_names[j])
@@ -280,6 +279,9 @@ def plot_eval(
                     num_humans * help_reward + max_episode_steps * proximity_reward + 0.2,
                 )
             )
+        else: 
+            ax.set_xlim(3.5, 8)
+            ax.set_ylim(2, 5.5)
 
         fig.tight_layout()
         path = out_dir / f"{name}{suffix}.png"
@@ -321,7 +323,7 @@ def eval_run_id(run_id, config=None, render=False, both_interps=False) -> None:
     agent = make_agent(env=base_env, agent_config=agent_config)
     agent.load(agent_path)
 
-    out_dir = Path("results/reach_goal/pareto_front_small") / run_id
+    out_dir = Path("results/firefighters-mo-ecc-v0/eval") / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if use_ecc or eval_both_interps:
@@ -344,11 +346,11 @@ def eval_run_id(run_id, config=None, render=False, both_interps=False) -> None:
             # Full agent: sweep its native weight dim, record the projection.
             weight_dim = None if use_ecc else getattr(agent, "reward_dim", None)
             eval_agent(
-                interp_env, agent, label=label, weight_dim=weight_dim,
+                interp_env, agent, label=label, weight_dim=weight_dim, out_dir=out_dir,
                 **eval_config, **env_config
             )
     else:
-        eval_agent(base_env, agent, **eval_config, **env_config)
+        eval_agent(base_env, agent, out_dir=out_dir, **eval_config, **env_config)
 
 
 def main() -> None:

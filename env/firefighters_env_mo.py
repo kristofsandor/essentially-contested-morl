@@ -62,7 +62,7 @@ class FireFightersEnvMO(gym.Env):
         self,
         feature_selection=FeatureSelectionFFEnv.ONE_HOT_FEATURES,
         horizon=50,
-        initial_state_distribution="random",
+        initial_state_distribution="deterministic",
         **kwargs,
     ):
         self.horizon = horizon

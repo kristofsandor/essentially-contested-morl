@@ -6,9 +6,13 @@
     "env": {
         "id": "firefighters-mo-ecc-v0",
         "horizon": 50,
+        "interpretations": [
+            ["pf_rescue", "px_people"],
+            ["pf_fire", "px_fire"]
+        ],
         "interpretation_labels": [
-            "graded",
-            "idealist"
+            "rescue_minded",
+            "fire_minded"
         ]
     },
     "train": {
@@ -17,7 +21,7 @@
         "num_eval_weights_for_front": 25,
         "num_eval_episodes_for_front": 5,
         "num_eval_weights_for_eval": 25,
-        "verbose": true,
+        "verbose": false,
         "num_checkpoints": 3,
         "out_dir": "results/reach_goal/pareto_front_small"
     },
@@ -50,6 +54,7 @@
             0.5
         ],
         "use_hv": false,
-        "log": true
+        "log": true,
+        "experiment_name": "firefighters_ecc_envelope"
     }
 }

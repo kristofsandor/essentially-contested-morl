@@ -16,7 +16,7 @@ Notes:
     ``pareto=False`` for the convex hull (the convex coverage set that linear
     scalarisation / Envelope / GPI-LS can recover).
 
-Run:  python -m scripts.ecc_pareto_front --preset rescue_vs_fire
+Run:  python -m scripts.firefighters_pareto_fronts --preset all_five --gamma 0.95 --iters 130
 """
 
 import argparse

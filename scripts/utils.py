@@ -191,11 +191,12 @@ def interp_label_list(num_interps, env=None):
 
 
 def find_model_path(run_id):
-    base = "results/reach_goal/pareto_front_small"
+    base = "results/firefighters-mo-ecc-v0"
     # any folder under base dir that contains run_id (recursive, multiple level of folders and i search the lowest level one)
     for path in Path(base).rglob(f"*{run_id}*"):
         if path.is_dir():
             return path / "model.tar"
+    raise ValueError(f"Could not find model path for run_id {run_id} under {base}")
 
 
 def make_agent(env, agent_config):

@@ -19,7 +19,7 @@ from pathlib import Path
 import matplotlib
 
 import wandb
-from scripts.eval_envelope import eval_agent
+from scripts.eval import eval_agent
 from scripts.utils import find_model_path, interp_label_list, make_agent, make_env
 
 matplotlib.use("Agg")
