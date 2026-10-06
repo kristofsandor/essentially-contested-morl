@@ -1,27 +1,30 @@
 {
     "general": {
-        "use_ecc": false,
-        "eval_both_interps": false
+        "use_ecc": true,
+        "eval_both_interps": true
     },
     "env": {
-        "id": "firefighters-mo-ecc-v0",
-        "horizon": 50,
+        "id": "firefighters-mo-contested-v0",
+        "horizon": 5,
+        "initial_state_distribution": "deterministic",
         "interpretations": [
             ["pf_rescue", "px_people"],
             ["pf_fire", "px_fire"]
         ],
-        "interpretation_labels": ["rescue_minded", "fire_minded"],
-        "interp_index": 1
+        "interpretation_labels": [
+            "rescue_minded",
+            "fire_minded"
+        ]
     },
     "train": {
-        "total_timesteps": 30000,
+        "total_timesteps": 20000,
         "eval_freq": 2000,
         "num_eval_weights_for_front": 25,
         "num_eval_episodes_for_front": 5,
         "num_eval_weights_for_eval": 25,
         "verbose": false,
-        "num_checkpoints": 6,
-        "out_dir": "results/reach_goal/pareto_front_small"
+        "num_checkpoints": 5,
+        "out_dir": "results/firefighters-mo-contested-v0"
     },
     "eval": {
         "num_eval_episodes": 50,
@@ -29,25 +32,31 @@
     },
     "agent": {
         "ref_point": [0.0, 0.0],
-        "algorithm": "envelope",
+        "algorithm": "ecc_envelope",
         "seed": 42,
-        "learning_rate": 3e-4,
+        "learning_rate": 1e-4,
         "initial_epsilon": 1.0,
-        "final_epsilon": 0.0,
-        "epsilon_decay_steps": 15000,
+        "final_epsilon": 0.01,
+        "epsilon_decay_steps": 5000,
         "net_arch": [
             128,
             128,
             128
         ],
-        "batch_size": 128,
+        "batch_size": 64,
         "learning_starts": 500,
         "gradient_updates": 1,
         "target_net_update_freq": 500,
         "envelope": true,
-        "per": true,
+        "per": false,
         "num_sample_w": 5,
+        "num_interps": 2,
+        "interp_weight": [
+            0.5,
+            0.5
+        ],
+        "use_hv": true,
         "log": true,
-        "experiment_name": "firefighters_envelope_fire"
+        "experiment_name": "firefighters_ecc_envelope_contested_anchors3"
     }
 }

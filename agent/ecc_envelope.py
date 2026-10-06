@@ -125,7 +125,7 @@ class QNetEnsemble(nn.ModuleList):
     def forward(self, obs, w):
         """Run every Q-net and stack the results.
 
-        Returns: a tensor of shape [num_interps, ...] with the stacked Q-values.
+        Returns: a tensor of shape [num_nets, ...] with the stacked Q-values.
         """
         return th.stack([q_net(obs, w) for q_net in self])
 
@@ -172,8 +172,11 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
         use_hv: bool = False,
         ref_point: np.ndarray = np.array([-100.0, -100.0]),
         dirichlet_alpha: float = 0.8,
+        interp_dirichlet_alpha: float = 1.0,
+        interp_sample: str = "dirichlet",
         num_interps: int = 2,
         interp_weight: np.ndarray = np.array([0.5, 0.5]),
+        interp_anchors: Optional[np.ndarray] = None,
         ucb_beta: float = 1.0,
         ucb_n_candidates: int = 50,
         ucb_neighbor_dist: float = 0.2,
@@ -213,6 +216,12 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
             device: The device to use for training.
             group: The wandb group to use for logging.
             ref_point: reference point for the hypervolume computation.
+            interp_anchors: [num_nets, num_interps] matrix of interpretation weights
+                to train a dedicated Q-net at. Net k is trained on the reward
+                ``anchors[k] @ reward_matrix``. Defaults to ``eye(num_interps)``,
+                i.e. one net per interpretation (the original behaviour). Adding
+                interior anchors (e.g. [0.5, 0.5]) makes the blended policy exact
+                there instead of only at the corners -- see ``_anchor_coef``.
         """
         MOAgent.__init__(self, env, device=device, seed=seed)
         MOPolicy.__init__(self, device)
@@ -239,12 +248,21 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
         # Accept a plain list (e.g. from a JSON config) or an array.
         self.ref_point = np.asarray(ref_point, dtype=np.float32)
         self.dirichlet_alpha = dirichlet_alpha
+        # Alpha for sampling the *interpretation* weight each episode. 1.0 is uniform
+        # over the simplex; < 1 biases toward the corners (pure interpretations), which
+        # gives the corner anchor nets more on-policy data.
+        self.interp_dirichlet_alpha = interp_dirichlet_alpha
+        if interp_sample not in ("dirichlet", "anchors"):
+            raise ValueError(
+                f"interp_sample must be 'dirichlet' or 'anchors', got {interp_sample!r}"
+            )
+        self.interp_sample = interp_sample
         self.num_interps = num_interps
-        self.interp_weight = interp_weight  # default training interp weight
+        # Interp weight used only when train() is given an explicit `weight` (single
+        # weight training) -- otherwise iw is sampled per episode, like w.
+        self.interp_weight = interp_weight
         # Interpretation weight used by greedy eval / max_action. Defaults to the
         # training interp_weight; pin a one-hot via set_eval_interp_weight to query a
-        # single interpretation (mirrors ECCGPIPD so callers with a fixed eval(obs, w)
-        # signature, e.g. the per-interpretation sweep, work without passing interp_w).
         self._eval_interp_w = np.asarray(interp_weight, dtype=np.float32)
         self.ucb_beta = ucb_beta
         self.ucb_n_candidates = ucb_n_candidates
@@ -259,21 +277,30 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
         # [shared/task, ...]). The agent reshapes it back into rows and trains
         # network i on row i.
         self.flat_reward_dim = self.reward_dim  # reward_space.shape[0]
-        assert self.flat_reward_dim % self.num_interps == 0, (
-            f"reward_dim={self.flat_reward_dim} is not divisible by "
-            f"num_interps={self.num_interps}."
+        self.net_reward_dim = self.reward_dim // self.num_interps
+
+        # Interpretation anchors: one Q-net per row. Net k is trained on the reward
+        # anchors[k] @ reward_matrix, so each net is a self-consistent Q-function for
+        # *its own* scalarized interpretation and may take its own argmax. Querying an
+        # anchor exactly is therefore optimal; between anchors we interpolate the two
+        # neighbours (_anchor_coef). eye(num_interps) reproduces the original one-net-
+        # per-interpretation behaviour.
+        if interp_anchors is None:
+            interp_anchors = np.eye(self.num_interps)
+        self.interp_anchors = np.asarray(interp_anchors, dtype=np.float32).reshape(
+            -1, self.num_interps
         )
-        assert len(self.interp_weight) == self.num_interps, (
-            f"interp_weight has length {len(self.interp_weight)} but "
-            f"num_interps={self.num_interps}."
+        assert np.allclose(self.interp_anchors.sum(axis=1), 1.0), (
+            f"each interp anchor must sum to 1, got {self.interp_anchors}"
         )
-        self.net_reward_dim = self.flat_reward_dim // self.num_interps
+        self.num_nets = self.interp_anchors.shape[0]
+        self._anchors_t = th.tensor(self.interp_anchors).float().to(self.device)
 
         self.q_nets = QNetEnsemble()
         self.target_q_nets = QNetEnsemble()
 
         if len(self.observation_shape) == 1:
-            for i in range(num_interps):
+            for i in range(self.num_nets):
                 self.q_nets.append(
                     QNet(
                         self.observation_shape,
@@ -291,24 +318,25 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
                     ).to(self.device)
                 )
         elif len(self.observation_shape) > 1:  # use CNNQNet
-            self.q_nets.append(
-                CNNQNet(
-                    self.observation_shape,
-                    self.action_dim,
-                    self.net_reward_dim,
-                    net_arch=net_arch,
-                    cnn_config=cnn_config,
-                ).to(self.device)
-            )
-            self.target_q_nets.append(
-                CNNQNet(
-                    self.observation_shape,
-                    self.action_dim,
-                    self.net_reward_dim,
-                    net_arch=net_arch,
-                    cnn_config=cnn_config,
-                ).to(self.device)
-            )
+            for i in range(self.num_nets):
+                self.q_nets.append(
+                    CNNQNet(
+                        self.observation_shape,
+                        self.action_dim,
+                        self.net_reward_dim,
+                        net_arch=net_arch,
+                        cnn_config=cnn_config,
+                    ).to(self.device)
+                )
+                self.target_q_nets.append(
+                    CNNQNet(
+                        self.observation_shape,
+                        self.action_dim,
+                        self.net_reward_dim,
+                        net_arch=net_arch,
+                        cnn_config=cnn_config,
+                    ).to(self.device)
+                )
 
         for q_net, target_q_net in zip(self.q_nets, self.target_q_nets):
             target_q_net.load_state_dict(q_net.state_dict())
@@ -325,9 +353,9 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
         self._episode_mo_returns: List[np.ndarray] = (
             []
         )  # combined (agent-space) MO returns
-        # Per-interpretation fronts for sum-of-HV UCB signal.
-        self._episode_mo_returns_per_interp: List[List[np.ndarray]] = [
-            [] for _ in range(self.num_interps)
+        # Per-anchor fronts for sum-of-HV UCB signal (one per Q-net).
+        self._episode_mo_returns_per_net: List[List[np.ndarray]] = [
+            [] for _ in range(self.num_nets)
         ]
         # Sliding window of (joint_key, normalised_marginal_hv) where
         # joint_key = concat(w, interp_weight).
@@ -380,6 +408,22 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
             "homotopy_decay_steps": self.homotopy_decay_steps,
             "learning_starts": self.learning_starts,
             "seed": self.seed,
+            # These drive the training curriculum but used to be absent from the logged
+            # config, so two runs with different values were indistinguishable in wandb.
+            "num_interps": self.num_interps,
+            "num_nets": self.num_nets,
+            "interp_anchors": self.interp_anchors.tolist(),
+            "dirichlet_alpha": self.dirichlet_alpha,
+            "interp_dirichlet_alpha": self.interp_dirichlet_alpha,
+            "interp_sample": self.interp_sample,
+            "interp_weight": np.asarray(self.interp_weight).tolist(),
+            "use_hv": self.use_hv,
+            "ucb_beta": self.ucb_beta,
+            "ucb_n_candidates": self.ucb_n_candidates,
+            "ucb_neighbor_dist": self.ucb_neighbor_dist,
+            "ucb_window": self.ucb_window,
+            "ucb_warmup_episodes": self.ucb_warmup_episodes,
+            "ucb_epsilon": self.ucb_epsilon,
         }
 
     def save(
@@ -525,13 +569,16 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
                 b_dones.repeat(self.num_sample_w, 1),
             )
 
-            # the buffer stores the flattened env reward matrix; unflatten it back
-            # into per-interpretation rows so net i is trained on row i.
-            b_rewards_per_net = b_rewards.view(
+            # The buffer stores the flattened env reward matrix; unflatten it back into
+            # per-interpretation rows, then project onto the anchors so net k is trained
+            # on anchors[k] @ reward_matrix. With the default eye() anchors this is
+            # exactly the old "net i gets row i".
+            b_rewards_mat = b_rewards.view(
                 b_rewards.size(0), self.num_interps, self.net_reward_dim
-            ).permute(
-                1, 0, 2
-            )  # [num_interps, N, net_reward_dim]
+            )  # [N, num_interps, net_reward_dim]
+            b_rewards_per_net = th.einsum(
+                "ki,nir->knr", self._anchors_t, b_rewards_mat
+            )  # [num_nets, N, net_reward_dim]
 
             # update each q net separately
             with th.no_grad():
@@ -541,7 +588,7 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
                     targets = self.ddqn_target(b_next_obs, w)
                 target_q = b_rewards_per_net + (1 - b_dones) * self.gamma * targets
 
-            q_values = self.q_nets(b_obs, w)  # [num_interps, N, action_dim, reward_dim]
+            q_values = self.q_nets(b_obs, w)  # [num_nets, N, action_dim, reward_dim]
             q_value = q_values.gather(
                 2,
                 b_actions.long()
@@ -549,7 +596,7 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
                 .expand(q_values.size(0), q_values.size(1), 1, q_values.size(3)),
             ).squeeze(
                 2
-            )  # [num_interps, N, reward_dim]
+            )  # [num_nets, N, reward_dim]
 
             critic_loss = F.mse_loss(q_value, target_q)
 
@@ -582,7 +629,7 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
             if self.per:
                 td_err = (
                     q_value[:, : len(b_inds)] - target_q[:, : len(b_inds)]
-                ).detach()  # [num_interps, b_inds, reward_dim]
+                ).detach()  # [num_nets, b_inds, reward_dim]
                 priority = th.einsum("isr,sr->is", td_err, w[: len(b_inds)]).abs()
                 # average the priority across the q-nets
                 priority = priority.mean(dim=0)
@@ -674,6 +721,63 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
         )
         self._eval_interp_w = iw
 
+    def _anchor_coef(self, interp_w) -> np.ndarray:
+        """Express an interpretation weight as a mixture over the anchor Q-nets.
+
+        Each net is a valid Q-function only for *its own* anchor, so an exact anchor
+        query must resolve to a single net (one-hot) -- blending nets whose greedy
+        futures differ is what makes the mixed policy suboptimal. Off-anchor we
+        interpolate the two bracketing anchors: still a blend, but of neighbours whose
+        policies are close, so the residual bias is small. Snapping to the nearest
+        anchor instead is worse off-anchor (it runs a policy optimal for the wrong
+        reward), so interpolate rather than round.
+
+        With the default ``eye(num_interps)`` anchors this returns ``interp_w``
+        unchanged, i.e. the original behaviour.
+
+        Args:
+            interp_w: interpretation weight, array or tensor of shape (num_interps,).
+
+        Returns: coefficients over the anchors, shape (num_nets,), summing to 1.
+        """
+        if th.is_tensor(interp_w):
+            interp_w = interp_w.detach().cpu().numpy()
+        iw = np.asarray(interp_w, dtype=np.float64).ravel()
+
+        # Exact anchor -> that net alone. This is the path eval takes.
+        for k, anchor in enumerate(self.interp_anchors):
+            if np.allclose(anchor, iw, atol=1e-8):
+                coef = np.zeros(self.num_nets, dtype=np.float64)
+                coef[k] = 1.0
+                return coef
+
+        if self.num_interps != 2:
+            raise NotImplementedError(
+                "Off-anchor interpolation is only implemented for num_interps == 2, "
+                "where the anchors lie on a line. For more interpretations either "
+                "query anchors exactly or add a simplex triangulation here. "
+                f"Got num_interps={self.num_interps}, interp_w={iw}."
+            )
+
+        # 1-D family: anchors are [x, 1-x], so bracket on the first coordinate.
+        xs = self.interp_anchors[:, 0].astype(np.float64)
+        order = np.argsort(xs)
+        xs_sorted = xs[order]
+        x = float(np.clip(iw[0], xs_sorted[0], xs_sorted[-1]))
+        j = int(np.clip(np.searchsorted(xs_sorted, x) - 1, 0, len(xs_sorted) - 2))
+        lo, hi = xs_sorted[j], xs_sorted[j + 1]
+        t = 0.0 if hi <= lo else (x - lo) / (hi - lo)
+        coef = np.zeros(self.num_nets, dtype=np.float64)
+        coef[order[j]] = 1.0 - t
+        coef[order[j + 1]] = t
+        return coef
+
+    def _anchor_coef_t(self, interp_w) -> th.Tensor:
+        """``_anchor_coef`` as a float tensor on the agent's device."""
+        return th.as_tensor(
+            self._anchor_coef(interp_w), dtype=th.float32, device=self.device
+        )
+
     @override
     def eval(self, obs: np.ndarray, w: np.ndarray, interp_w: np.ndarray = None) -> int:
         if interp_w is None:
@@ -724,11 +828,11 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
         obs_per_weight = th.stack([obs] * self.num_sample_w)
         q_set = self.q_nets(
             obs_per_weight, sampled_w
-        )  # [num_interps, K, action_dim, reward_dim]
-        # scalarize between interps with the current episode's interp weight
+        )  # [num_nets, K, action_dim, reward_dim]
+        # collapse the anchor nets down to the requested interp weight
         q_set = th.einsum(
-            "i,ikar->kar",
-            th.tensor(interp_w).float().to(self.device),
+            "n,nkar->kar",
+            self._anchor_coef_t(interp_w),
             q_set,
         )  # [K, action_dim, reward_dim]
         return q_set
@@ -758,15 +862,15 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
 
 
     def _marginal_hv_sum(self) -> float:
-        """Sum of marginal HV contributions across all interpretations.
+        """Sum of marginal HV contributions across all anchors.
 
-        Each interpretation maintains its own Pareto front over [task, help_i].
-        An episode that expands either front contributes positively.  Call this
-        *after* appending to ``_episode_mo_returns_per_interp``.
+        Each anchor maintains its own Pareto front over [task, help_k].
+        An episode that expands any front contributes positively.  Call this
+        *after* appending to ``_episode_mo_returns_per_net``.
         """
         total_marginal = 0.0
         total_current = 0.0
-        for returns in self._episode_mo_returns_per_interp:
+        for returns in self._episode_mo_returns_per_net:
             if len(returns) == 0:
                 continue
             front_with = list(get_non_dominated({tuple(r) for r in returns}))
@@ -782,6 +886,50 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
             total_marginal += hv_with - hv_without
         normalised = total_marginal / total_current if total_current > 0 else 1.0
         return float(normalised), float(total_current)
+
+    def _sample_interp_weights(self, n: int = 1) -> np.ndarray:
+        """Sample ``n`` interpretation weights according to ``interp_sample``.
+
+        'dirichlet' draws continuously over the simplex (density set by
+        ``interp_dirichlet_alpha``). 'anchors' draws uniformly from the anchor rows
+        instead, so every Q-net gets an equal share of episodes in which it alone
+        drives action selection -- under continuous sampling, bracketing leaves each
+        non-adjacent net out of action selection entirely (with 3 anchors, each corner
+        net participates in only ~half of episodes), so the corner nets see less data
+        generated by anything resembling their own greedy policy.
+
+        Returns: shape (num_interps,) when n == 1, else [n, num_interps] -- matching
+        the convention of ``random_weights``.
+        """
+        if self.interp_sample == "anchors":
+            idx = self.np_random.integers(0, self.num_nets, size=n)
+            iw = self.interp_anchors[idx].astype(np.float64)
+            return iw[0] if n == 1 else iw
+        return random_weights(
+            self.num_interps,
+            n,
+            dist="dirichlet",
+            rng=self.np_random,
+            alpha=self.interp_dirichlet_alpha,
+        )
+
+    def _sample_train_weights(self) -> tuple:
+        """Objective + interpretation weight for one training episode (non-UCB path).
+
+        Both are sampled. Pinning ``iw`` to ``self.interp_weight`` would run the whole
+        behaviour policy at a single interpretation, which is only what we want when
+        ``train`` is given an explicit ``weight``.
+
+        Returns: (w, iw) as numpy arrays of shape (net_reward_dim,) / (num_interps,).
+        """
+        w = random_weights(
+            self.net_reward_dim,
+            1,
+            dist="dirichlet",
+            rng=self.np_random,
+            alpha=self.dirichlet_alpha,
+        )
+        return w, self._sample_interp_weights(1)
 
     def ucb_best_weight_and_interp(self) -> tuple:
         """UCB-style joint selection of objective weight and interpretation weight.
@@ -802,9 +950,7 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
                 random_weights(
                     self.net_reward_dim, 1, dist="dirichlet", rng=self.np_random
                 ),
-                random_weights(
-                    self.num_interps, 1, dist="dirichlet", rng=self.np_random
-                ),
+                self._sample_interp_weights(1),
             )
 
         # ε-greedy: keep probing randomly after warmup.
@@ -813,9 +959,7 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
                 random_weights(
                     self.net_reward_dim, 1, dist="dirichlet", rng=self.np_random
                 ),
-                random_weights(
-                    self.num_interps, 1, dist="dirichlet", rng=self.np_random
-                ),
+                self._sample_interp_weights(1),
             )
 
         # Sample candidate pairs from the joint simplex.
@@ -825,12 +969,7 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
             dist="dirichlet",
             rng=self.np_random,
         )
-        cand_iw = random_weights(
-            self.num_interps,
-            self.ucb_n_candidates,
-            dist="dirichlet",
-            rng=self.np_random,
-        )
+        cand_iw = self._sample_interp_weights(self.ucb_n_candidates)
         cand_keys = np.concatenate(
             [cand_w, cand_iw], axis=1
         )  # [C, net_reward_dim + num_interps]
@@ -885,15 +1024,16 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
 
         Returns: the action with the highest Q-value.
         """
-        q_values = self.q_nets(obs, w)  # [num_interps, B, action_dim, reward_dim]
+        q_values = self.q_nets(obs, w)  # [num_nets, B, action_dim, reward_dim]
         # scalarize over objectives with w
         scalarized_q_values = th.einsum(
-            "r,ibar->iba", w, q_values
-        )  # [num_interps, B, action_dim]
-        # scalarize between interps with the current episode's interp weight
+            "r,nbar->nba", w, q_values
+        )  # [num_nets, B, action_dim]
+        # collapse the anchor nets down to the requested interp weight. At an anchor
+        # this selects a single net, whose Q is a genuine Q-function -> greedy is exact.
         scalarized_q_values = th.einsum(
-            "i,iba->ba",
-            th.tensor(interp_w).float().to(self.device),
+            "n,nba->ba",
+            self._anchor_coef_t(interp_w),
             scalarized_q_values,
         )  # [B, action_dim]
         max_act = th.argmax(scalarized_q_values, dim=1)
@@ -916,9 +1056,9 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
         W = sampled_w.repeat(obs.size(0), 1)
         # Repeat the observations for each sampled weight
         next_obs = obs.repeat_interleave(sampled_w.size(0), 0)
-        # Num interps X Batch size X Num sampled weights X Num actions X Num objectives
+        # Num nets X Batch size X Num sampled weights X Num actions X Num objectives
         next_q_values = self.q_nets(next_obs, W).view(
-            self.num_interps,
+            self.num_nets,
             obs.size(0),
             sampled_w.size(0),
             self.action_dim,
@@ -933,7 +1073,7 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
 
         # MO Q-values evaluated on the target networks
         next_q_values_target = self.target_q_nets(next_obs, W).view(
-            self.num_interps,
+            self.num_nets,
             obs.size(0),
             sampled_w.size(0),
             self.action_dim,
@@ -956,11 +1096,11 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
         # Index the Q-values for the max sampled weights
         max_next_q = max_next_q.gather(
             2,
-            pref.reshape(self.num_interps, -1, 1, 1).expand(
+            pref.reshape(self.num_nets, -1, 1, 1).expand(
                 max_next_q.size(0), max_next_q.size(1), 1, max_next_q.size(3)
             ),
         ).squeeze(2)
-        return max_next_q  # [num_interps, N, reward_dim]
+        return max_next_q  # [num_nets, N, reward_dim]
 
     @th.no_grad()
     def ddqn_target(self, obs: th.Tensor, w: th.Tensor) -> th.Tensor:
@@ -973,13 +1113,13 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
         Returns: the DQN target.
         """
         # Max action for each state, per q-net
-        q_values = self.q_nets(obs, w)  # [num_interps, N, action_dim, reward_dim]
+        q_values = self.q_nets(obs, w)  # [num_nets, N, action_dim, reward_dim]
         scalarized_q_values = th.einsum("br,ibar->iba", w, q_values)
-        max_acts = th.argmax(scalarized_q_values, dim=2)  # [num_interps, N]
+        max_acts = th.argmax(scalarized_q_values, dim=2)  # [num_nets, N]
         # Action evaluated with the target networks
         q_values_target = self.target_q_nets(
             obs, w
-        )  # [num_interps, N, action_dim, reward_dim]
+        )  # [num_nets, N, action_dim, reward_dim]
         q_values_target = q_values_target.gather(
             2,
             max_acts.long()
@@ -991,7 +1131,7 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
                 q_values_target.size(3),
             ),
         ).squeeze(2)
-        return q_values_target  # [num_interps, N, reward_dim]
+        return q_values_target  # [num_nets, N, reward_dim]
 
     def train(
         self,
@@ -1068,14 +1208,7 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
         elif self.use_hv:
             w, iw = self.ucb_best_weight_and_interp()
         else:
-            w = random_weights(
-                self.net_reward_dim,
-                1,
-                dist="dirichlet",
-                rng=self.np_random,
-                alpha=self.dirichlet_alpha,
-            )
-            iw = np.array(self.interp_weight, dtype=np.float32)
+            w, iw = self._sample_train_weights()
 
         tensor_w = th.tensor(w).float().to(self.device)
         tensor_iw = th.tensor(iw).float().to(self.device)
@@ -1122,14 +1255,16 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
 
                 if "episode" in info.keys():
                     ep_info = info["episode"]
-                    # Reshape flat env return into per-interpretation rows.
+                    # Reshape flat env return into per-interpretation rows, then project
+                    # onto the anchors so each net's front tracks its own reward.
                     flat_return = np.array(ep_info["r"]).flatten()
                     per_interp_return = flat_return.reshape(
                         self.num_interps, self.net_reward_dim
                     )
-                    for i in range(self.num_interps):
-                        self._episode_mo_returns_per_interp[i].append(
-                            per_interp_return[i].copy()
+                    per_net_return = self.interp_anchors @ per_interp_return
+                    for k in range(self.num_nets):
+                        self._episode_mo_returns_per_net[k].append(
+                            per_net_return[k].copy()
                         )
                     # Combined agent-space return (for logging / episode reward).
                     mo_return = self._to_agent_objective(flat_return, iw)
@@ -1161,14 +1296,7 @@ class ECCEnvelope(MOPolicy, MyMOAgent):
                     if self.use_hv:
                         w, iw = self.ucb_best_weight_and_interp()
                     else:
-                        w = random_weights(
-                            self.net_reward_dim,
-                            1,
-                            dist="dirichlet",
-                            rng=self.np_random,
-                            alpha=self.dirichlet_alpha,
-                        )
-                        iw = np.array(self.interp_weight, dtype=np.float32)
+                        w, iw = self._sample_train_weights()
                     tensor_w = th.tensor(w).float().to(self.device)
                     tensor_iw = th.tensor(iw).float().to(self.device)
 

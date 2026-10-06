@@ -13,6 +13,12 @@ from morl_baselines.common.weights import equally_spaced_weights
 
 COMPONENT_NAMES = ["professionalism", "proximity"]
 
+# Envs that emit the flattened multi-interpretation reward and so can be projected
+# onto a single interpretation directly. A run trained on one of these is re-evaluated
+# under both interps through its own env; any other (plain) run falls back to the
+# reach-goal ECC env, whose obs space matches the plain reach-goal agent.
+ECC_ENV_IDS = {"ecc-goal-safe-v0", "firefighters-mo-ecc-v0", "firefighters-mo-contested-v0"}
+
 
 def wrapped_reward_space(env):
     """Return the outermost ``reward_space`` in the wrapper chain.
@@ -280,8 +286,10 @@ def plot_eval(
                 )
             )
         else: 
-            ax.set_xlim(3.5, 8)
-            ax.set_ylim(2, 5.5)
+            # ax.set_xlim(3.5, 8)
+            # ax.set_ylim(2, 5.5)
+            ax.set_xlim(0, 5)
+            ax.set_ylim(0, 4)
 
         fig.tight_layout()
         path = out_dir / f"{name}{suffix}.png"
@@ -323,21 +331,25 @@ def eval_run_id(run_id, config=None, render=False, both_interps=False) -> None:
     agent = make_agent(env=base_env, agent_config=agent_config)
     agent.load(agent_path)
 
-    out_dir = Path("results/firefighters-mo-ecc-v0/eval") / run_id
+    # Write eval outputs under the run's own env dir (e.g. firefighters-mo-contested-v0),
+    # so contested and plain-ECC evals never collide.
+    out_dir = Path("results") / env_config["id"] / "eval" / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if use_ecc or eval_both_interps:
         num_interps = getattr(agent, "num_interps", 2)
         for i, label in enumerate(interp_label_list(num_interps, base_env)):
-            # Project the raw multi-interpretation reward onto interpretation i. The
-            # reach-goal ECC reward layout lives in the ECC env, so force that id (the
-            # agent may have been trained on a non-ECC env, but its obs space matches
-            # and it is queried against the projection). Pass interp_index explicitly so
-            # the saved env_config's wrapper choice never leaks in.
+            # Project the raw multi-interpretation reward onto interpretation i. If the
+            # run's own env already emits that flattened reward (an ECC env, e.g.
+            # firefighters-mo-ecc-v0), project through it so its dynamics and reward
+            # layout are preserved. Only a plain reach-goal agent (non-ECC env) falls
+            # back to ecc-goal-safe-v0, whose obs space matches it. interp_index is
+            # passed explicitly so the saved env_config's wrapper choice never leaks in.
+            proj_id = env_config["id"] if env_config["id"] in ECC_ENV_IDS else "ecc-goal-safe-v0"
             interp_env = make_env(
                 {
                     **env_config,
-                    "id": "ecc-goal-safe-v0",
+                    "id": proj_id,
                     "interp_index": i,
                 }
             )

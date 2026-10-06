@@ -30,6 +30,8 @@ class ECCReachGoalEnv(gym.Env):
         proximity_reward=0.05,
         obs_as_grid=True,
         render_mode=None,
+        layout_seed=None,
+        age_mode="random",
     ):
         self.grid_size = grid_size
         self.num_humans = num_humans
@@ -37,6 +39,18 @@ class ECCReachGoalEnv(gym.Env):
         self.terminal_reward = terminal_reward
         self.obs_as_grid = obs_as_grid
         self.proximity_reward = proximity_reward
+        # Layout control. With layout_seed set, the human positions (and ages, in
+        # "random" mode) are regenerated identically on every reset, making the
+        # whole env deterministic so its theoretical Pareto front is well defined.
+        # age_mode picks how each human's utilitarian value is grounded:
+        #   "random" -> ages ~ U(0.001, 1.0), independent of position.
+        #   "depth"  -> age grows with row depth, so the humans worth most to the
+        #               utilitarian reading are also the most expensive to reach.
+        #               This is what makes the utilitarian front genuinely differ
+        #               from the deontological (count-only) one: the same conflict
+        #               that ContestedFireFightersEnvMO creates with time pressure.
+        self.layout_seed = layout_seed
+        self.age_mode = age_mode
         self.action_space = gym.spaces.Discrete(len(Action))
         if obs_as_grid:
             self.observation_space = gym.spaces.Box(
@@ -87,14 +101,28 @@ class ECCReachGoalEnv(gym.Env):
         self.reset()
 
     def setup(self):
+        # A fresh seeded generator each call reproduces the same layout every
+        # reset (deterministic env). With no seed we fall back to the global
+        # np.random stream, preserving the previous behaviour and any external
+        # np.random.seed control.
+        rng = np.random if self.layout_seed is None else np.random.default_rng(self.layout_seed)
         agent_pos = [0, 0]
         goal_pos = [0, self.grid_size - 1]  # top right
         prev_pos = [0, 0]
-        human_ages = np.random.uniform(0.001, 1.0, self.num_humans).round(2)
-        human_positions = self.distribute_humans_2(self.grid_size, self.num_humans)
+        human_positions = self.distribute_humans_2(self.grid_size, self.num_humans, rng)
         human_positions = np.array(
             sorted(human_positions, key=lambda pos: (pos[0], pos[1]))
         )  # sort by row, then column for consistency
+        if self.age_mode == "depth":
+            # Age is the row depth normalised to (0, 1]. Deeper humans (more steps
+            # away from the row-0 path between start and goal) are worth more to the
+            # utilitarian reading, so it pays a larger detour cost than the
+            # deontological reading, which only counts rescues.
+            rows = human_positions[:, 0].astype(np.float32)
+            human_ages = (rows / max(self.grid_size - 1, 1)).round(2)
+            human_ages = np.clip(human_ages, 0.001, 1.0)
+        else:
+            human_ages = rng.uniform(0.001, 1.0, self.num_humans).round(2)
         helped = np.zeros(len(human_positions), dtype=bool)
         return agent_pos, goal_pos, prev_pos, human_ages, human_positions, helped
 
@@ -188,7 +216,7 @@ class ECCReachGoalEnv(gym.Env):
         idx = np.random.choice(len(all_points), size=n, replace=False)
         return all_points[idx]
 
-    def distribute_humans_2(self, grid_size, num_humans):
+    def distribute_humans_2(self, grid_size, num_humans, rng=None):
         """Place humans across rows 1..grid_size-1 for graduated detour costs.
 
         Round-robin: 1 human → row 1; G-1 humans → one per row;
@@ -196,6 +224,8 @@ class ECCReachGoalEnv(gym.Env):
         Deep-first variant: doubles up on deep rows before shallow ones,
         keeping early humans cheap and later ones expensive.
         """
+        if rng is None:
+            rng = np.random
         n_rows = grid_size - 1  # exclude agent/goal row 0
         if num_humans > n_rows * grid_size:
             raise ValueError(
@@ -213,7 +243,7 @@ class ECCReachGoalEnv(gym.Env):
         counts = Counter(row_assignments)
         positions = []
         for row, count in counts.items():
-            cols = np.random.choice(grid_size, size=count, replace=False)
+            cols = rng.choice(grid_size, size=count, replace=False)
             for c in cols:
                 positions.append([row, c])
 

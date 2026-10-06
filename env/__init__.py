@@ -39,3 +39,8 @@ gym.register(
     id="firefighters-mo-ecc-v0",
     entry_point="env.firefighters_ecc:ECCFireFightersEnvMO",
 )
+
+gym.register(
+    id="firefighters-mo-contested-v0",
+    entry_point="env.firefighters_ecc:ContestedFireFightersEnvMO",
+)

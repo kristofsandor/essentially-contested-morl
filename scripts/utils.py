@@ -191,10 +191,13 @@ def interp_label_list(num_interps, env=None):
 
 
 def find_model_path(run_id):
-    base = "results/firefighters-mo-ecc-v0"
-    # any folder under base dir that contains run_id (recursive, multiple level of folders and i search the lowest level one)
+    base = "results"
+    # Any folder anywhere under results/ whose name contains run_id and that actually
+    # holds a checkpoint. Searching the whole tree (not a single env dir) lets eval find
+    # runs under firefighters-mo-ecc-v0, firefighters-mo-contested-v0, reach_goal, etc.
+    # The model.tar check skips the eval/<run_id> output dirs, which have no checkpoint.
     for path in Path(base).rglob(f"*{run_id}*"):
-        if path.is_dir():
+        if path.is_dir() and (path / "model.tar").exists():
             return path / "model.tar"
     raise ValueError(f"Could not find model path for run_id {run_id} under {base}")
 
